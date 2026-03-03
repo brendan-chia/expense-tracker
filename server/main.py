@@ -12,9 +12,6 @@ import os
 import logging
 from contextlib import asynccontextmanager
 
-# Ensure the server directory is on the path for local imports
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request, Response
 from telegram import Update
@@ -26,9 +23,16 @@ from telegram.ext import (
     filters,
 )
 
-from elevenlabs import transcribe_voice
-from expense_parser import parse_expense, parse_delete_intent
-from sheets import append_expense, get_month_summary, delete_expense_by_row
+try:
+    from server.elevenlabs import transcribe_voice
+    from server.expense_parser import parse_expense, parse_delete_intent
+    from server.sheets import append_expense, get_month_summary, delete_expense_by_row
+except ImportError:
+    # Fallback for running directly: python server/main.py
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from elevenlabs import transcribe_voice           # type: ignore
+    from expense_parser import parse_expense, parse_delete_intent  # type: ignore
+    from sheets import append_expense, get_month_summary, delete_expense_by_row  # type: ignore
 
 load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".env"))
 
@@ -349,7 +353,15 @@ def _build_application():
     return app
 
 
-ptb_app = _build_application()
+ptb_app = None
+
+
+def _get_ptb_app():
+    """Lazily build and return the PTB application (created once)."""
+    global ptb_app
+    if ptb_app is None:
+        ptb_app = _build_application()
+    return ptb_app
 
 
 # ---------------------------------------------------------------------------
@@ -357,21 +369,28 @@ ptb_app = _build_application()
 # ---------------------------------------------------------------------------
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
-    await ptb_app.initialize()
-    await ptb_app.start()
+    app_instance = _get_ptb_app()
+    await app_instance.initialize()
 
-    webhook_path = f"{WEBHOOK_URL}/webhook"
-    webhook_kwargs = {"url": webhook_path}
-    if WEBHOOK_SECRET:
-        webhook_kwargs["secret_token"] = WEBHOOK_SECRET
-    await ptb_app.bot.set_webhook(**webhook_kwargs)
-    logger.info(f"Webhook set to {webhook_path}")
+    # Optionally set webhook on startup (useful for local dev).
+    # On Vercel, set the webhook once manually via the Telegram API instead.
+    if WEBHOOK_URL and os.environ.get("AUTO_SET_WEBHOOK", "").lower() in ("1", "true"):
+        try:
+            webhook_path = f"{WEBHOOK_URL}/webhook"
+            webhook_kwargs = {"url": webhook_path}
+            if WEBHOOK_SECRET:
+                webhook_kwargs["secret_token"] = WEBHOOK_SECRET
+            await app_instance.bot.set_webhook(**webhook_kwargs)
+            logger.info(f"Webhook set to {webhook_path}")
+        except Exception as e:
+            logger.warning(f"Failed to set webhook: {e}")
 
     yield
 
-    await ptb_app.bot.delete_webhook()
-    await ptb_app.stop()
-    await ptb_app.shutdown()
+    try:
+        await app_instance.shutdown()
+    except Exception:
+        pass
 
 
 app = FastAPI(lifespan=lifespan)
@@ -388,8 +407,9 @@ async def telegram_webhook(request: Request) -> Response:
             return Response(status_code=403)
 
     data = await request.json()
-    update = Update.de_json(data=data, bot=ptb_app.bot)
-    await ptb_app.process_update(update)
+    app_instance = _get_ptb_app()
+    update = Update.de_json(data=data, bot=app_instance.bot)
+    await app_instance.process_update(update)
     return Response(status_code=200)
 
 
@@ -402,4 +422,4 @@ if __name__ == "__main__":
     import uvicorn
 
     port = int(os.environ.get("PORT", 8000))
-    uvicorn.run("main:app", host="0.0.0.0", port=port, reload=True)
+    uvicorn.run("server.main:app", host="0.0.0.0", port=port, reload=True)
