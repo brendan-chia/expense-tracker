@@ -2,6 +2,7 @@
 Google Sheets module - handles authentication, sheet setup, and expense logging.
 """
 
+import base64
 import json
 import logging
 import os
@@ -47,8 +48,14 @@ def get_client():
 
     # Prefer env-var JSON (for serverless / cloud deployments)
     creds_json = os.environ.get("GOOGLE_CREDENTIALS_JSON")
+    creds_b64 = os.environ.get("GOOGLE_CREDENTIALS_BASE64")
     if creds_json:
         info = json.loads(creds_json)
+        credentials = service_account.Credentials.from_service_account_info(
+            info, scopes=scopes,
+        )
+    elif creds_b64:
+        info = json.loads(base64.b64decode(creds_b64).decode("utf-8"))
         credentials = service_account.Credentials.from_service_account_info(
             info, scopes=scopes,
         )
