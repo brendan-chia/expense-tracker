@@ -127,31 +127,60 @@ def words_to_number(text: str) -> float | None:
     return total if total > 0 else None
 
 
+# Subunit keywords — when these follow a number, divide by 100
+SUBUNIT_KEYWORDS = {"cents", "cent", "sen"}
+
+
 def extract_amount(text: str) -> float | None:
     """
     Extract a monetary amount from text.
-    Supports digits (25), currency symbols (RM25), and word numbers (twenty five, seven).
+    Supports digits (25), currency symbols (RM25), word numbers (twenty five, seven),
+    and subunit keywords (eighty cents → 0.80, fifty sen → 0.50).
     """
     normalized = text.lower().strip()
 
     # 0. Handle "X ringgit Y cents/sen" pattern (digits) — e.g. "15 ringgit 32 cents"
     ringgit_cents_digits = re.search(
-        r"(\d+)\s*ringgit\s+(\d{1,2})\s*(?:cents?|sen)", normalized, re.IGNORECASE
+        r"(\d+)\s*ringgit\s+(?:and\s+)?(\d{1,2})\s*(?:cents?|sen)", normalized, re.IGNORECASE
     )
     if ringgit_cents_digits:
         amount = int(ringgit_cents_digits.group(1)) + int(ringgit_cents_digits.group(2)) / 100
         if 0 < amount < 1000000:
             return amount
 
-    # 1. Handle "X ringgit Y cents/sen" with word numbers — e.g. "fifteen ringgit thirty-two cents"
+    # 1. Handle "X ringgit (and) Y cents/sen" with word numbers
+    #    e.g. "fifteen ringgit thirty-two cents", "one ringgit and fifty sen"
     ringgit_word_match = re.search(
-        r"(.+?)\s*ringgit\s+(.+?)\s*(?:cents?|sen)", normalized, re.IGNORECASE
+        r"(.+?)\s*ringgit\s+(?:and\s+)?(.+?)\s*(?:cents?|sen)", normalized, re.IGNORECASE
     )
     if ringgit_word_match:
         ringgit_part = words_to_number(ringgit_word_match.group(1).strip())
         cents_part = words_to_number(ringgit_word_match.group(2).strip())
         if ringgit_part is not None and cents_part is not None:
             amount = ringgit_part + cents_part / 100
+            if 0 < amount < 1000000:
+                return amount
+
+    # 1b. Handle standalone "X cents/sen" with digits — e.g. "80 cents", "50 sen"
+    subunit_digit_match = re.search(
+        r"(\d+)\s*(?:cents?|sen)\b", normalized, re.IGNORECASE
+    )
+    if subunit_digit_match:
+        amount = int(subunit_digit_match.group(1)) / 100
+        if 0 < amount < 1000000:
+            return amount
+
+    # 1c. Handle standalone "X cents/sen" with word numbers — e.g. "eighty cents", "fifty sen"
+    #     Build a pattern that matches word-numbers followed by cents/sen
+    _word_num_names = "|".join(sorted(WORD_NUMBERS.keys(), key=len, reverse=True))
+    subunit_word_match = re.search(
+        rf"((?:(?:{_word_num_names})(?:\s+|-)?)+)\s*(?:cents?|sen)\b",
+        normalized, re.IGNORECASE,
+    )
+    if subunit_word_match:
+        num = words_to_number(subunit_word_match.group(1).strip())
+        if num is not None:
+            amount = num / 100
             if 0 < amount < 1000000:
                 return amount
 
