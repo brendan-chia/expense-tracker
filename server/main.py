@@ -126,7 +126,10 @@ async def handle_delete_intent(
     await update.message.chat.send_action("typing")
 
     try:
-        from sheets import get_client, ensure_sheet, SHEET_NAME
+        try:
+            from server.sheets import get_client, ensure_sheet, SHEET_NAME
+        except ImportError:
+            from sheets import get_client, ensure_sheet, SHEET_NAME  # type: ignore
         ensure_sheet()
         sheet_id = os.environ.get("GOOGLE_SHEET_ID", "")
         service = get_client()
