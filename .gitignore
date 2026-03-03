@@ -1,0 +1,32 @@
+# Secrets & credentials
+.env
+.env.*
+google-credentials.json
+*.json.bak
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+*.egg-info/
+dist/
+build/
+
+# Audio files (Telegram voice messages)
+*.ogg
+*.oga
+*.mp3
+*.wav
+
+# IDE & OS
+.vscode/
+.idea/
+*.swp
+*.swo
+Thumbs.db
+.DS_Store
+
+# Node (if any)
+node_modules/
