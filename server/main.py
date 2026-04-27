@@ -97,9 +97,64 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # /summary command
 async def summary_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Usage:
+      /summary              → current month
+      /summary march        → March of current year
+      /summary 3            → March of current year
+      /summary march 2025   → March 2025
+      /summary 3 2025       → March 2025
+    """
+    import calendar
+    from datetime import datetime
+
+    now = datetime.now()
+    month: int | None = None
+    year:  int | None = None
+
+    args = context.args or []
+
+    if args:
+        # Try to parse month from first arg (name or number)
+        month_arg = args[0].strip()
+        try:
+            month = int(month_arg)
+        except ValueError:
+            # Try full or abbreviated month name (e.g. "march" or "mar")
+            month_arg_cap = month_arg.capitalize()
+            matched = None
+            for fmt in ("%B", "%b"):
+                try:
+                    matched = datetime.strptime(month_arg_cap, fmt).month
+                    break
+                except ValueError:
+                    continue
+            if matched is None:
+                await update.message.reply_text(
+                    f'❌ Couldn\'t recognise "{month_arg}" as a month.\n'
+                    "Try: `/summary march`, `/summary 3`, or `/summary march 2025`",
+                    parse_mode="Markdown",
+                )
+                return
+            month = matched
+
+        if not (1 <= month <= 12):
+            await update.message.reply_text("❌ Month must be between 1 and 12.")
+            return
+
+        # Optional second arg: year
+        if len(args) >= 2:
+            try:
+                year = int(args[1].strip())
+            except ValueError:
+                await update.message.reply_text(
+                    f'❌ Couldn\'t recognise "{args[1]}" as a year.'
+                )
+                return
+
     try:
         await update.message.chat.send_action("typing")
-        summary = get_month_summary()
+        summary = get_month_summary(month=month, year=year)
         await update.message.reply_text(summary, parse_mode="Markdown")
     except Exception as e:
         logger.error(f"Summary error: {e}")

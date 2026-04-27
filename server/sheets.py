@@ -265,14 +265,22 @@ def delete_expense_by_row(row_number: int) -> dict | None:
 
     logger.info(f"Deleted row {row_number}: {deleted['category']} RM{deleted['amount']}")
     return deleted
+def get_month_summary(month: int | None = None, year: int | None = None) -> str:
+    """Get a summary of expenses for a given month/year from Google Sheets.
 
-
-def get_month_summary() -> str:
-    """Get a summary of this month's expenses from Google Sheets."""
+    Args:
+        month: 1-based month number (1=January … 12=December).
+               Defaults to the current month.
+        year:  4-digit year. Defaults to the current year.
+    """
     ensure_sheet()
     service = get_client()
     sheets = service.spreadsheets()
     sheet_id = _get_sheet_id()
+
+    now = datetime.now()
+    target_month = month if month is not None else now.month
+    target_year  = year  if year  is not None else now.year
 
     result = sheets.values().get(
         spreadsheetId=sheet_id,
@@ -283,22 +291,31 @@ def get_month_summary() -> str:
     if len(rows) <= 1:
         return "No expenses recorded yet. Send a voice message to start tracking!"
 
-    # Filter for current month
-    now = datetime.now()
-    current_month = now.month
-    current_year = now.year
+    # Support multiple date formats written by the bot
+    _DATE_FORMATS = ("%b %d, %Y", "%d-%m-%Y", "%d-%m-%y", "%Y-%m-%d")
+
+    def _parse_date(date_str: str):
+        for fmt in _DATE_FORMATS:
+            try:
+                return datetime.strptime(date_str.strip(), fmt)
+            except ValueError:
+                continue
+        return None
 
     month_expenses = []
     for row in rows[1:]:  # Skip header
         try:
-            date = datetime.strptime(row[0], "%b %d, %Y")
-            if date.month == current_month and date.year == current_year:
+            date = _parse_date(row[0])
+            if date and date.month == target_month and date.year == target_year:
                 month_expenses.append(row)
         except (ValueError, IndexError):
             continue
 
+    # Human-readable label for the requested period
+    period_label = datetime(target_year, target_month, 1).strftime("%B %Y")
+
     if not month_expenses:
-        return "No expenses recorded this month yet."
+        return f"No expenses recorded for *{period_label}*."
 
     # Calculate totals by category
     category_totals: dict[str, float] = {}
@@ -314,15 +331,14 @@ def get_month_summary() -> str:
         total += amount
 
     # Build summary message
-    month_name = now.strftime("%B %Y")
-    summary = f"*Expense Summary - {month_name}*\n\n"
+    summary = f"*Expense Summary - {period_label}*\n\n"
 
     # Sort categories by total (descending)
     sorted_categories = sorted(category_totals.items(), key=lambda x: x[1], reverse=True)
 
     for category, amount in sorted_categories:
         percentage = int((amount / total) * 100) if total > 0 else 0
-        summary += f"* {category}: *RM{amount:.2f}* ({percentage}%)\n"
+        summary += f"• {category}: *RM{amount:.2f}* ({percentage}%)\n"
 
     summary += f"\n*Total: RM{total:.2f}*"
     summary += f"\n{len(month_expenses)} expense(s) recorded"
