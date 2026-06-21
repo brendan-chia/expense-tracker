@@ -2,6 +2,9 @@
 
 A Telegram bot that lets you track expenses by sending voice messages. It uses **ElevenLabs** for speech-to-text transcription and logs everything to **Google Sheets**.
 
+<img width="842" height="942" alt="image" src="https://github.com/user-attachments/assets/67206055-d803-4aee-b041-6b313b5c0da9" />
+
+
 ## Features
 
 - **Voice messages** — Send a voice message describing your expense
@@ -55,33 +58,6 @@ A Telegram bot that lets you track expenses by sending voice messages. It uses *
    - Click **Share** on the Google Sheet
    - Add the service account email (found in `google-credentials.json` as `client_email`)
    - Give it **Editor** access
-
-### 4. Environment Variables
-
-1. Copy the example env file:
-   ```bash
-   cp .env.example .env
-   ```
-2. Fill in your values in `.env`:
-   ```
-   TELEGRAM_BOT_TOKEN=your_bot_token
-   ELEVENLABS_API_KEY=your_elevenlabs_key
-   GOOGLE_SHEET_ID=your_sheet_id
-   GOOGLE_SERVICE_ACCOUNT_FILE=./google-credentials.json
-   ```
-
-### 5. Install & Run
-
-```bash
-pip install -r requirements.txt
-python server/main.py
-```
-
-For development, you can use auto-reload with tools like `watchdog`:
-```bash
-pip install watchdog
-watchmedo auto-restart --patterns="*.py" --recursive -- python server/main.py
-```
 
 ## Usage
 
