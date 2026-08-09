@@ -28,8 +28,11 @@ try:
     from server.expense_parser import parse_expense, parse_delete_intent
     from server.sheets import (
         append_expense,
+        ensure_event_sheet,
+        get_event_summary,
         get_all_expenses,
         get_month_summary,
+        list_event_names,
         delete_expense_by_row,
     )
 except ImportError:
@@ -39,8 +42,11 @@ except ImportError:
     from expense_parser import parse_expense, parse_delete_intent  # type: ignore
     from sheets import (  # type: ignore
         append_expense,
+        ensure_event_sheet,
+        get_event_summary,
         get_all_expenses,
         get_month_summary,
+        list_event_names,
         delete_expense_by_row,
     )
 
@@ -76,6 +82,10 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         '"Undo the food expense"\n\n'
         "*Commands:*\n"
         "/summary - View this month's expense summary\n"
+        "/event Unit Rental - create/select an event tab\n"
+        "/event-summary - calculate the selected event\n"
+        "/event off - return to monthly tabs\n"
+        "/events - list event tabs\n"
         "/help - Show this help message",
         parse_mode="Markdown",
     )
@@ -103,9 +113,111 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         'Just type something like "Kopi RM5" or "Groceries 45 ringgit"\n\n'
         "*Commands:*\n"
         "/summary - This month's expense summary\n"
+        "/event Unit Rental - create/select an event tab\n"
+        "/event-summary - calculate the selected event\n"
+        "/event off - return to monthly tabs\n"
+        "/events - list event tabs\n"
         "/help - Show this message",
         parse_mode="Markdown",
     )
+
+
+async def event_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Create/select an event tab or leave event mode."""
+    args = context.args or []
+    event_name = " ".join(args).strip()
+
+    if event_name.casefold() in {"off", "none", "stop", "clear"}:
+        previous = context.chat_data.pop("active_event", None)
+        if previous:
+            await update.message.reply_text(
+                f"Event mode off. New expenses will return to monthly tabs.\n"
+                f"Previous event: {previous}"
+            )
+        else:
+            await update.message.reply_text(
+                "Event mode is already off. New expenses will use monthly tabs."
+            )
+        return
+
+    if not event_name:
+        active_event = context.chat_data.get("active_event")
+        if active_event:
+            await update.message.reply_text(
+                f"Current event: *{active_event}*\n\n"
+                "Use `/event off` to return to monthly tabs or "
+                "`/event-summary` to calculate its total.",
+                parse_mode="Markdown",
+            )
+        else:
+            await update.message.reply_text(
+                "Use `/event Unit Rental` to create/select an event.\n"
+                "Use `/event off` to return to monthly tabs.",
+                parse_mode="Markdown",
+            )
+        return
+
+    try:
+        clean_name = ensure_event_sheet(event_name)
+        context.chat_data["active_event"] = clean_name
+        await update.message.reply_text(
+            f"✅ Event selected: *{clean_name}*\n\n"
+            f"New expenses will be logged in the `Event - {clean_name}` tab.\n"
+            "Use `/event-summary` for the total or `/event off` to leave event mode.",
+            parse_mode="Markdown",
+        )
+    except Exception as e:
+        logger.error(f"Event setup error: {e}")
+        await update.message.reply_text(
+            "Failed to create the event tab. Check Google Sheets connection."
+        )
+
+
+async def events_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """List all event tabs."""
+    try:
+        events = list_event_names()
+        active_event = context.chat_data.get("active_event")
+        if not events:
+            await update.message.reply_text(
+                "No event tabs yet. Create one with `/event Unit Rental`.",
+                parse_mode="Markdown",
+            )
+            return
+
+        lines = ["*Event tabs:*"]
+        for name in events:
+            marker = " ✅" if name.casefold() == str(active_event or "").casefold() else ""
+            lines.append(f"• {name}{marker}")
+        await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+    except Exception as e:
+        logger.error(f"Event list error: {e}")
+        await update.message.reply_text(
+            "Failed to list event tabs. Check Google Sheets connection."
+        )
+
+
+async def event_summary_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show a total for an event, using the selected event when omitted."""
+    args = context.args or []
+    event_name = " ".join(args).strip() or context.chat_data.get("active_event")
+    if not event_name:
+        await update.message.reply_text(
+            "Select an event first, for example `/event Unit Rental`, "
+            "then use `/event-summary`.",
+            parse_mode="Markdown",
+        )
+        return
+
+    try:
+        await update.message.chat.send_action("typing")
+        summary = get_event_summary(event_name)
+        await update.message.reply_text(summary, parse_mode="Markdown")
+    except Exception as e:
+        logger.error(f"Event summary error: {e}")
+        await update.message.reply_text(
+            "Failed to calculate the event total. Check Google Sheets connection."
+        )
 
 
 # /summary command
@@ -196,7 +308,7 @@ async def handle_delete_intent(
     try:
         # Read every legacy/month tab so deletion works after expenses are split
         # across tabs. The row number is kept per tab for the Sheets API.
-        all_expenses = get_all_expenses()
+        all_expenses = get_all_expenses(include_events=True)
 
         def _parse_date(date_str: str):
             """Parse supported expense dates; unparseable dates sort last."""
@@ -338,15 +450,22 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
-        # 5. Log to Google Sheets
-        append_expense(expense)
+        # 5. Log to Google Sheets (selected event or automatic month tab)
+        active_event = context.chat_data.get("active_event")
+        target_tab = append_expense(expense, event_name=active_event)
+        destination = (
+            f"Event: *{active_event}*"
+            if active_event
+            else f"Tab: *{target_tab}*"
+        )
 
         await update.message.reply_text(
             "*Expense logged!*\n\n"
             f"Amount: *RM{expense['amount']:.2f}*\n"
             f"Category: *{expense['category']}*\n"
             f"Description: {expense['description']}\n"
-            f"Date: {expense['date']}",
+            f"Date: {expense['date']}\n"
+            f"{destination}",
             parse_mode="Markdown",
         )
     except Exception as e:
@@ -382,14 +501,21 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
-        append_expense(expense)
+        active_event = context.chat_data.get("active_event")
+        target_tab = append_expense(expense, event_name=active_event)
+        destination = (
+            f"Event: *{active_event}*"
+            if active_event
+            else f"Tab: *{target_tab}*"
+        )
 
         await update.message.reply_text(
             "*Expense logged!*\n\n"
             f"Amount: *RM{expense['amount']:.2f}*\n"
             f"Category: *{expense['category']}*\n"
             f"Description: {expense['description']}\n"
-            f"Date: {expense['date']}",
+            f"Date: {expense['date']}\n"
+            f"{destination}",
             parse_mode="Markdown",
         )
     except Exception as e:
@@ -408,6 +534,9 @@ def _build_application():
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("summary", summary_command))
+    app.add_handler(CommandHandler("event", event_command))
+    app.add_handler(CommandHandler("event-summary", event_summary_command))
+    app.add_handler(CommandHandler("events", events_command))
     app.add_handler(MessageHandler(filters.VOICE, handle_voice))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 

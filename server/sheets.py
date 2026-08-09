@@ -15,6 +15,7 @@ from googleapiclient.discovery import build
 logger = logging.getLogger(__name__)
 
 SHEET_NAME = os.environ.get("GOOGLE_EXPENSES_SHEET", "April")
+EVENT_TAB_PREFIX = "Event - "
 HEADERS = ["Date", "Amount", "Category", "Description", "Timestamp"]
 
 _DATE_FORMATS = (
@@ -31,6 +32,7 @@ _MONTH_TAB_PATTERN = re.compile(
     r"(?:\s+\d{4})?$",
     re.IGNORECASE,
 )
+_EVENT_INVALID_CHARS = re.compile(r"[\[\]:*?/\\]")
 
 _sheets_client = None
 
@@ -96,6 +98,23 @@ def _quote_sheet_name(sheet_name: str) -> str:
     return "'" + sheet_name.replace("'", "''") + "'"
 
 
+def normalize_event_name(event_name: str) -> str:
+    """Normalize an event name before using it in a Google Sheets tab title."""
+    name = re.sub(r"\s+", " ", str(event_name or "").strip())
+    if name.casefold().startswith(EVENT_TAB_PREFIX.casefold()):
+        name = name[len(EVENT_TAB_PREFIX):].strip()
+    name = _EVENT_INVALID_CHARS.sub("-", name).strip(" .")
+    name = name[: (100 - len(EVENT_TAB_PREFIX))].strip(" .")
+    if not name:
+        raise ValueError("Event name cannot be empty")
+    return name
+
+
+def event_sheet_name(event_name: str) -> str:
+    """Return the Google Sheets tab title for an event."""
+    return f"{EVENT_TAB_PREFIX}{normalize_event_name(event_name)}"
+
+
 def _parse_expense_date(date_value) -> datetime | None:
     """Parse dates written by the bot or entered manually in the sheet."""
     if isinstance(date_value, datetime):
@@ -124,8 +143,12 @@ def _get_sheet_properties(service, spreadsheet=None) -> list[dict]:
     ]
 
 
-def _get_expense_sheet_names(service, spreadsheet=None) -> list[str]:
-    """Find the legacy and month-named tabs used for expense data."""
+def _get_expense_sheet_names(
+    service,
+    spreadsheet=None,
+    include_events: bool = False,
+) -> list[str]:
+    """Find the legacy, month, and optionally event tabs used for expenses."""
     known_name = SHEET_NAME.casefold()
     names = []
     for properties in _get_sheet_properties(service, spreadsheet):
@@ -133,6 +156,10 @@ def _get_expense_sheet_names(service, spreadsheet=None) -> list[str]:
         if (
             title.casefold() in {known_name, "expenses"}
             or _MONTH_TAB_PATTERN.fullmatch(title.strip())
+            or (
+                include_events
+                and title.casefold().startswith(EVENT_TAB_PREFIX.casefold())
+            )
         ):
             names.append(title)
     return names
@@ -260,18 +287,73 @@ def ensure_sheet(sheet_name: str = SHEET_NAME):
         raise
 
 
-def append_expense(expense: dict):
-    """Append an expense to the tab matching its month and year."""
+def ensure_event_sheet(event_name: str) -> str:
+    """Create an event tab if needed and return its clean display name."""
+    clean_name = normalize_event_name(event_name)
+    ensure_sheet(event_sheet_name(clean_name))
+    return clean_name
+
+
+def list_event_names() -> list[str]:
+    """Return the names of all event tabs in the spreadsheet."""
+    service = get_client()
+    spreadsheet = service.spreadsheets().get(
+        spreadsheetId=_get_sheet_id(),
+    ).execute()
+    prefix_length = len(EVENT_TAB_PREFIX)
+    return [
+        properties["title"][prefix_length:]
+        for properties in _get_sheet_properties(service, spreadsheet)
+        if properties["title"].casefold().startswith(EVENT_TAB_PREFIX.casefold())
+    ]
+
+
+def _read_expenses_from_sheet(
+    sheets,
+    spreadsheet_id: str,
+    sheet_name: str,
+) -> list[dict]:
+    """Read expense rows from one tab, retaining tab and row identity."""
+    result = sheets.values().get(
+        spreadsheetId=spreadsheet_id,
+        range=f"{_quote_sheet_name(sheet_name)}!A:E",
+    ).execute()
+    rows = result.get("values", [])
+    expenses = []
+
+    for row_number, row in enumerate(rows[1:], start=2):
+        if not row:
+            continue
+        expenses.append(
+            {
+                "sheet_name": sheet_name,
+                "row_number": row_number,
+                "date": row[0] if len(row) > 0 else "",
+                "amount": row[1] if len(row) > 1 else "",
+                "category": row[2] if len(row) > 2 else "",
+                "description": row[3] if len(row) > 3 else "",
+                "timestamp": row[4] if len(row) > 4 else "",
+            }
+        )
+    return expenses
+
+
+def append_expense(expense: dict, event_name: str | None = None) -> str:
+    """Append an expense to an event tab or the tab matching its month/year."""
     service = get_client()
     sheets = service.spreadsheets()
     spreadsheet_id = _get_sheet_id()
-    spreadsheet = sheets.get(spreadsheetId=spreadsheet_id).execute()
-    existing_titles = {
-        properties["title"]
-        for properties in _get_sheet_properties(service, spreadsheet)
-    }
-    sheet_name = _choose_month_sheet_name(expense, existing_titles)
-    ensure_sheet(sheet_name)
+    if event_name:
+        clean_event_name = ensure_event_sheet(event_name)
+        sheet_name = event_sheet_name(clean_event_name)
+    else:
+        spreadsheet = sheets.get(spreadsheetId=spreadsheet_id).execute()
+        existing_titles = {
+            properties["title"]
+            for properties in _get_sheet_properties(service, spreadsheet)
+        }
+        sheet_name = _choose_month_sheet_name(expense, existing_titles)
+        ensure_sheet(sheet_name)
 
     timestamp = datetime.now().isoformat()
     row = [
@@ -296,15 +378,20 @@ def append_expense(expense: dict):
         expense["amount"],
         expense["category"],
     )
+    return sheet_name
 
 
-def get_all_expenses() -> list[dict]:
-    """Read expense rows from the legacy tab and all month tabs."""
+def get_all_expenses(include_events: bool = False) -> list[dict]:
+    """Read expense rows from month tabs and optionally event tabs."""
     service = get_client()
     sheets = service.spreadsheets()
     spreadsheet_id = _get_sheet_id()
     spreadsheet = sheets.get(spreadsheetId=spreadsheet_id).execute()
-    sheet_names = _get_expense_sheet_names(service, spreadsheet)
+    sheet_names = _get_expense_sheet_names(
+        service,
+        spreadsheet,
+        include_events=include_events,
+    )
 
     if not sheet_names:
         ensure_sheet()
@@ -312,28 +399,50 @@ def get_all_expenses() -> list[dict]:
 
     all_expenses = []
     for sheet_name in sheet_names:
-        result = sheets.values().get(
-            spreadsheetId=spreadsheet_id,
-            range=f"{_quote_sheet_name(sheet_name)}!A:E",
-        ).execute()
-        rows = result.get("values", [])
-
-        for row_number, row in enumerate(rows[1:], start=2):
-            if not row:
-                continue
-            all_expenses.append(
-                {
-                    "sheet_name": sheet_name,
-                    "row_number": row_number,
-                    "date": row[0] if len(row) > 0 else "",
-                    "amount": row[1] if len(row) > 1 else "",
-                    "category": row[2] if len(row) > 2 else "",
-                    "description": row[3] if len(row) > 3 else "",
-                    "timestamp": row[4] if len(row) > 4 else "",
-                }
-            )
-
+        all_expenses.extend(
+            _read_expenses_from_sheet(sheets, spreadsheet_id, sheet_name)
+        )
     return all_expenses
+
+
+def get_event_summary(event_name: str) -> str:
+    """Calculate totals for one event tab, grouped by category."""
+    clean_name = ensure_event_sheet(event_name)
+    sheet_name = event_sheet_name(clean_name)
+    service = get_client()
+    sheets = service.spreadsheets()
+    expenses = _read_expenses_from_sheet(
+        sheets,
+        _get_sheet_id(),
+        sheet_name,
+    )
+
+    if not expenses:
+        return f"No expenses recorded for *{clean_name}*."
+
+    category_totals: dict[str, float] = {}
+    total = 0.0
+    for expense in expenses:
+        try:
+            amount = float(expense["amount"])
+        except (ValueError, TypeError):
+            amount = 0.0
+        category = expense.get("category") or "Other"
+        category_totals[category] = category_totals.get(category, 0) + amount
+        total += amount
+
+    summary = f"*Event Summary - {clean_name}*\n\n"
+    for category, amount in sorted(
+        category_totals.items(),
+        key=lambda item: item[1],
+        reverse=True,
+    ):
+        percentage = int((amount / total) * 100) if total > 0 else 0
+        summary += f"• {category}: *RM{amount:.2f}* ({percentage}%)\n"
+
+    summary += f"\n*Total: RM{total:.2f}*"
+    summary += f"\n{len(expenses)} expense(s) recorded"
+    return summary
 
 
 def delete_expense_by_row(
