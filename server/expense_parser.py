@@ -249,13 +249,15 @@ def extract_date(text: str) -> str:
             pass
 
     # 2. Try "ordinal/number month" — e.g. "sixth February", "6th February", "6 February"
+    #    An optional year lets the bot route the expense to the right year tab.
     #    Build ordinal pattern
     ordinal_words = "|".join(ORDINAL_NUMBERS.keys())
     month_words = "|".join(MONTH_NAMES.keys())
 
     # Pattern: "sixth February" or "6th February" or "6th of February" or "6 Feb"
     match = re.search(
-        rf"({ordinal_words}|\d{{1,2}}(?:st|nd|rd|th)?)\s+(?:of\s+)?({month_words})",
+        rf"({ordinal_words}|\d{{1,2}}(?:st|nd|rd|th)?)\s+(?:of\s+)?({month_words})"
+        rf"(?:\s*,?\s*(\d{{4}}))?",
         lower
     )
     if match:
@@ -264,7 +266,7 @@ def extract_date(text: str) -> str:
         day = ORDINAL_NUMBERS.get(day_str) or int(re.sub(r"(st|nd|rd|th)$", "", day_str))
         month = MONTH_NAMES.get(month_str)
         if day and month:
-            year = now.year
+            year = int(match.group(3)) if match.group(3) else now.year
             try:
                 dt = datetime(year, month, day)
                 return f"{dt.day}-{dt.month}-{dt.year}"
@@ -273,7 +275,8 @@ def extract_date(text: str) -> str:
 
     # Pattern: "February sixth" or "February 6th" or "February of 6th" or "Feb 6"
     match = re.search(
-        rf"({month_words})\s+(?:of\s+)?({ordinal_words}|\d{{1,2}}(?:st|nd|rd|th)?)",
+        rf"({month_words})\s+(?:of\s+)?({ordinal_words}|\d{{1,2}}(?:st|nd|rd|th)?)"
+        rf"(?:\s*,?\s*(\d{{4}}))?",
         lower
     )
     if match:
@@ -282,7 +285,7 @@ def extract_date(text: str) -> str:
         day = ORDINAL_NUMBERS.get(day_str) or int(re.sub(r"(st|nd|rd|th)$", "", day_str))
         month = MONTH_NAMES.get(month_str)
         if day and month:
-            year = now.year
+            year = int(match.group(3)) if match.group(3) else now.year
             try:
                 dt = datetime(year, month, day)
                 return f"{dt.day}-{dt.month}-{dt.year}"

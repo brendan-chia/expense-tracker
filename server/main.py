@@ -26,13 +26,23 @@ from telegram.ext import (
 try:
     from server.elevenlabs import transcribe_voice
     from server.expense_parser import parse_expense, parse_delete_intent
-    from server.sheets import append_expense, get_month_summary, delete_expense_by_row
+    from server.sheets import (
+        append_expense,
+        get_all_expenses,
+        get_month_summary,
+        delete_expense_by_row,
+    )
 except ImportError:
     # Fallback for running directly: python server/main.py
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     from elevenlabs import transcribe_voice           # type: ignore
     from expense_parser import parse_expense, parse_delete_intent  # type: ignore
-    from sheets import append_expense, get_month_summary, delete_expense_by_row  # type: ignore
+    from sheets import (  # type: ignore
+        append_expense,
+        get_all_expenses,
+        get_month_summary,
+        delete_expense_by_row,
+    )
 
 load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".env"))
 
@@ -58,6 +68,8 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         '"I spent 7 ringgit on chicken rice"\n'
         '"Paid 50 for groceries"\n'
         '"Grab ride 12 ringgit"\n\n'
+        'To log an expense for another month, include its date, e.g. '
+        '"RM25 groceries on 5 May 2026"\n\n'
         "*Remove an expense by voice:*\n"
         '"Delete the last expense"\n'
         '"Remove my grab entry"\n'
@@ -81,6 +93,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         '- Include the amount: "7 ringgit", "RM25", "fifty"\n'
         '- Include a category: "nasi lemak", "grab", "groceries"\n'
         '- Include a description: "lunch at mamak"\n\n'
+        '- For a different month, include a date: "RM25 groceries on 5 May 2026"\n\n'
         "*Removing an expense:*\n"
         'Say or type something like:\n'
         '• "Delete the last expense" — removes your most recent entry\n'
@@ -181,38 +194,25 @@ async def handle_delete_intent(
     await update.message.chat.send_action("typing")
 
     try:
-        try:
-            from server.sheets import get_client, ensure_sheet, SHEET_NAME
-        except ImportError:
-            from sheets import get_client, ensure_sheet, SHEET_NAME  # type: ignore
-        ensure_sheet()
-        sheet_id = os.environ.get("GOOGLE_SHEET_ID", "")
-        service = get_client()
-        result = service.spreadsheets().values().get(
-            spreadsheetId=sheet_id,
-            range=f"{SHEET_NAME}!A:E",
-        ).execute()
-        rows = result.get("values", [])
-        data_rows = rows[1:] if len(rows) > 1 else []  # skip header
-        all_expenses = []
-        for idx, row in enumerate(data_rows, start=2):
-            all_expenses.append({
-                "row_number":  idx,
-                "date":        row[0] if len(row) > 0 else "",
-                "amount":      row[1] if len(row) > 1 else "",
-                "category":    row[2] if len(row) > 2 else "",
-                "description": row[3] if len(row) > 3 else "",
-            })
+        # Read every legacy/month tab so deletion works after expenses are split
+        # across tabs. The row number is kept per tab for the Sheets API.
+        all_expenses = get_all_expenses()
 
         def _parse_date(date_str: str):
-            """Parse d-m-yyyy into a sortable tuple. Falls back to (0,0,0)."""
+            """Parse supported expense dates; unparseable dates sort last."""
             from datetime import datetime
-            for fmt in ("%d-%m-%Y", "%d-%m-%y", "%Y-%m-%d"):
+            for fmt in (
+                "%d-%m-%Y",
+                "%d-%m-%y",
+                "%Y-%m-%d",
+                "%b %d, %Y",
+                "%B %d, %Y",
+            ):
                 try:
-                    return datetime.strptime(date_str.strip(), fmt)
+                    return datetime.strptime(str(date_str).strip(), fmt)
                 except ValueError:
                     continue
-            return datetime.min  # unparseable → sort to the very bottom
+            return datetime.min
 
         # Sort ALL expenses by date descending (latest date first)
         recent = sorted(all_expenses, key=lambda e: _parse_date(e["date"]), reverse=True)
@@ -271,7 +271,10 @@ async def handle_delete_intent(
         return True
 
     try:
-        deleted = delete_expense_by_row(target["row_number"])
+        deleted = delete_expense_by_row(
+            target["row_number"],
+            sheet_name=target["sheet_name"],
+        )
     except Exception as e:
         logger.error(f"Delete failed: {e}")
         await update.message.reply_text(
