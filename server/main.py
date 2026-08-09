@@ -83,7 +83,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "*Commands:*\n"
         "/summary - View this month's expense summary\n"
         "/event Unit Rental - create/select an event tab\n"
-        "/event-summary - calculate the selected event\n"
+        "/event_summary - calculate the selected event\n"
         "/event off - return to monthly tabs\n"
         "/events - list event tabs\n"
         "/help - Show this help message",
@@ -114,7 +114,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "*Commands:*\n"
         "/summary - This month's expense summary\n"
         "/event Unit Rental - create/select an event tab\n"
-        "/event-summary - calculate the selected event\n"
+        "/event_summary - calculate the selected event\n"
         "/event off - return to monthly tabs\n"
         "/events - list event tabs\n"
         "/help - Show this message",
@@ -146,7 +146,7 @@ async def event_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(
                 f"Current event: *{active_event}*\n\n"
                 "Use `/event off` to return to monthly tabs or "
-                "`/event-summary` to calculate its total.",
+                "`/event_summary` to calculate its total.",
                 parse_mode="Markdown",
             )
         else:
@@ -163,7 +163,7 @@ async def event_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             f"✅ Event selected: *{clean_name}*\n\n"
             f"New expenses will be logged in the `Event - {clean_name}` tab.\n"
-            "Use `/event-summary` for the total or `/event off` to leave event mode.",
+            "Use `/event_summary` for the total or `/event off` to leave event mode.",
             parse_mode="Markdown",
         )
     except Exception as e:
@@ -204,7 +204,7 @@ async def event_summary_command(update: Update, context: ContextTypes.DEFAULT_TY
     if not event_name:
         await update.message.reply_text(
             "Select an event first, for example `/event Unit Rental`, "
-            "then use `/event-summary`.",
+            "then use `/event_summary`.",
             parse_mode="Markdown",
         )
         return
@@ -535,7 +535,8 @@ def _build_application():
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("summary", summary_command))
     app.add_handler(CommandHandler("event", event_command))
-    app.add_handler(CommandHandler("event-summary", event_summary_command))
+    app.add_handler(CommandHandler("event_summary", event_summary_command))
+    app.add_handler(CommandHandler("eventsummary", event_summary_command))
     app.add_handler(CommandHandler("events", events_command))
     app.add_handler(MessageHandler(filters.VOICE, handle_voice))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
