@@ -11,6 +11,7 @@ import sys
 import os
 import logging
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request, Response
@@ -78,6 +79,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         '"RM25 groceries on 5 May 2026"\n\n'
         "*Remove an expense by voice:*\n"
         '"Delete the last expense"\n'
+        '"Remove the most recent response"\n'
         '"Remove my grab entry"\n'
         '"Undo the food expense"\n\n'
         "*Commands:*\n"
@@ -107,6 +109,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "*Removing an expense:*\n"
         'Say or type something like:\n'
         '• "Delete the last expense" — removes your most recent entry\n'
+        '• "Remove the most recent response" — also removes your latest entry\n'
         '• "Remove my grab entry" — finds & removes the most recent Grab expense\n'
         '• "Undo the food expense" — removes the most recent Food \u0026 Dining entry\n\n'
         "*You can also type expenses:*\n"
@@ -303,17 +306,63 @@ async def handle_delete_intent(
     Returns True if deletion was handled (success or failure), False if we
     should fall through to normal expense-logging.
     """
-    await update.message.chat.send_action("typing")
+    # Keep this boundary defensive. The parser normally returns this schema,
+    # but a future parser change or a malformed transcription must not turn a
+    # delete request into an unhandled KeyError/AttributeError.
+    if not isinstance(intent, dict):
+        await update.message.reply_text(
+            "I understood this as a removal request, but couldn't determine "
+            "which expense to remove. Try \"remove the most recent expense\"."
+        )
+        return True
+
+    mode = intent.get("mode")
+    if mode not in {"last", "search"}:
+        await update.message.reply_text(
+            "I understood this as a removal request, but couldn't determine "
+            "which expense to remove. Try \"remove the most recent expense\"."
+        )
+        return True
+
+    keyword = str(intent.get("keyword") or "").strip().casefold()
+    category = str(intent.get("category") or "").strip()
+    if mode == "search" and not keyword:
+        # Treat an incomplete search intent as a request for the latest entry
+        # rather than crashing or searching for an empty string.
+        mode = "last"
 
     try:
+        await update.message.chat.send_action("typing")
+
         # Read every legacy/month tab so deletion works after expenses are split
         # across tabs. The row number is kept per tab for the Sheets API.
         all_expenses = get_all_expenses(include_events=True)
 
-        def _parse_date(date_str: str):
-            """Parse supported expense dates; unparseable dates sort last."""
-            from datetime import datetime
+        def _parse_datetime(value):
+            """Parse timestamps and dates stored by Google Sheets."""
+            value = str(value or "").strip()
+            if not value:
+                return None
+
+            # New rows contain an ISO timestamp. Normalize timezone-aware
+            # values before comparing them with older, naive sheet dates.
+            try:
+                parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+                if parsed.tzinfo is not None:
+                    parsed = parsed.astimezone(timezone.utc).replace(tzinfo=None)
+                return parsed
+            except ValueError:
+                pass
+
             for fmt in (
+                "%d/%m/%Y %H:%M:%S",
+                "%m/%d/%Y %H:%M:%S",
+                "%d/%m/%Y %H:%M",
+                "%m/%d/%Y %H:%M",
+                "%d/%m/%Y %I:%M:%S %p",
+                "%m/%d/%Y %I:%M:%S %p",
+                "%d/%m/%Y %I:%M %p",
+                "%m/%d/%Y %I:%M %p",
                 "%d-%m-%Y",
                 "%d-%m-%y",
                 "%Y-%m-%d",
@@ -321,15 +370,28 @@ async def handle_delete_intent(
                 "%B %d, %Y",
             ):
                 try:
-                    return datetime.strptime(str(date_str).strip(), fmt)
+                    return datetime.strptime(value, fmt)
                 except ValueError:
                     continue
-            return datetime.min
+            return None
 
-        # Sort ALL expenses by date descending (latest date first)
-        recent = sorted(all_expenses, key=lambda e: _parse_date(e["date"]), reverse=True)
-    except Exception as e:
-        logger.error(f"Delete: failed to fetch recent expenses: {e}")
+        def _expense_sort_key(expense: dict):
+            # "Most recent" means the latest logged record, not merely the
+            # latest expense date. Fall back to the date for legacy rows that
+            # do not have a timestamp, then to the row number for a stable tie.
+            logged_at = _parse_datetime(expense.get("timestamp"))
+            expense_date = _parse_datetime(expense.get("date"))
+            row_number = expense.get("row_number", 0)
+            try:
+                row_number = int(row_number)
+            except (TypeError, ValueError):
+                row_number = 0
+            return (logged_at or expense_date or datetime.min, row_number)
+
+        # Sort ALL expenses across all tabs, newest logged entry first.
+        recent = sorted(all_expenses or [], key=_expense_sort_key, reverse=True)
+    except Exception:
+        logger.exception("Delete: failed to fetch recent expenses")
         await update.message.reply_text(
             "\u274c Couldn't reach Google Sheets. Please try again."
         )
@@ -343,23 +405,22 @@ async def handle_delete_intent(
 
     target = None
 
-    if intent["mode"] == "last":
+    if mode == "last":
         target = recent[0]  # newest
 
     else:  # mode == "search"
-        keyword = intent["keyword"].lower()
-        category = intent["category"]
-
         # Priority 1: description keyword match
         for exp in recent:
-            if keyword in exp["description"].lower():
+            description = str(exp.get("description") or "").casefold()
+            if keyword in description:
                 target = exp
                 break
 
         # Priority 2: category match
         if target is None and category and category != "Other":
             for exp in recent:
-                if exp["category"].lower() == category.lower():
+                expense_category = str(exp.get("category") or "").casefold()
+                if expense_category == category.casefold():
                     target = exp
                     break
 
@@ -368,8 +429,8 @@ async def handle_delete_intent(
             keywords = keyword.split()
             for exp in recent:
                 haystack = " ".join([
-                    exp["description"].lower(),
-                    exp["category"].lower(),
+                    str(exp.get("description") or "").casefold(),
+                    str(exp.get("category") or "").casefold(),
                 ])
                 if any(kw in haystack for kw in keywords):
                     target = exp
@@ -387,8 +448,15 @@ async def handle_delete_intent(
             target["row_number"],
             sheet_name=target["sheet_name"],
         )
-    except Exception as e:
-        logger.error(f"Delete failed: {e}")
+    except (KeyError, TypeError, ValueError):
+        logger.exception("Delete failed: selected expense has invalid row data")
+        await update.message.reply_text(
+            "\u274c I found the expense, but its sheet row is invalid. "
+            "Please try again or remove it manually in Google Sheets."
+        )
+        return True
+    except Exception:
+        logger.exception("Delete failed")
         await update.message.reply_text(
             "\u274c Failed to delete the expense. Please try again."
         )
@@ -397,10 +465,10 @@ async def handle_delete_intent(
     if deleted:
         await update.message.reply_text(
             "\u2705 *Expense deleted!*\n\n"
-            f"Amount: *RM{deleted['amount']}*\n"
-            f"Category: *{deleted['category']}*\n"
-            f"Description: {deleted['description']}\n"
-            f"Date: {deleted['date']}",
+            f"Amount: *RM{deleted.get('amount', '')}*\n"
+            f"Category: *{deleted.get('category', 'Other')}*\n"
+            f"Description: {deleted.get('description', '')}\n"
+            f"Date: {deleted.get('date', '')}",
             parse_mode="Markdown",
         )
     else:
@@ -426,11 +494,13 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # 2. Transcribe using ElevenLabs
         transcript = transcribe_voice(file_url)
 
-        if not transcript or not transcript.strip():
+        if not isinstance(transcript, str) or not transcript.strip():
             await update.message.reply_text(
                 "Couldn't understand the voice message. Please try again."
             )
             return
+
+        transcript = transcript.strip()
 
         await update.message.reply_text(f'Heard: "{transcript}"')
 
@@ -468,8 +538,8 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"{destination}",
             parse_mode="Markdown",
         )
-    except Exception as e:
-        logger.error(f"Voice processing error: {e}")
+    except Exception:
+        logger.exception("Voice processing error")
         await update.message.reply_text(
             "Something went wrong processing your voice message. Please try again."
         )
@@ -518,8 +588,8 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"{destination}",
             parse_mode="Markdown",
         )
-    except Exception as e:
-        logger.error(f"Text expense error: {e}")
+    except Exception:
+        logger.exception("Text expense error")
         await update.message.reply_text("Failed to log expense. Please try again.")
 
 

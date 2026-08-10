@@ -66,6 +66,7 @@ A Telegram bot that lets you track expenses by sending voice messages. It uses *
 |--------|-----|
 | Log expense (voice) | Send a voice message: *"I spent 7 ringgit on chicken rice"* |
 | Log expense (text) | Type: *"Kopi RM5"* or *"Groceries 45 ringgit"* |
+| Remove latest expense | Say or type: *"Remove the most recent response"* or *"Delete the last expense"* |
 | Log an expense for another month | Include the date: *"RM25 groceries on 5 May 2026"*. The `May 2026` tab is created automatically. |
 | Start event tracking | Send `/event Unit Rental`. This creates/uses the `Event - Unit Rental` tab. |
 | Calculate event expenses | Send `/event_summary` or `/event_summary Unit Rental` |

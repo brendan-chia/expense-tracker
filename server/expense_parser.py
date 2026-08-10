@@ -327,7 +327,9 @@ _DELETE_TRIGGER_PHRASES = [
     r"\bdelete\b",
     r"\bremove\b",
     r"\bundo\b",
+    r"\bget\s+rid\s+of\b",
     r"\bcancel\b.*\bexpense\b",
+    r"\bcancel\b.*\b(entry|record|transaction|purchase)\b",
     r"\berase\b",
     r"\bscratch that\b",
     r"\bthat was wrong\b",
@@ -339,7 +341,22 @@ _DELETE_TRIGGER_PHRASES = [
 ]
 
 _LAST_INDICATORS = re.compile(
-    r"\b(last|latest|recent|that|previous|just now)\b",
+    r"\b(?:most\s+recent|last|latest|recent|that|previous|prior|newest|just\s+now)\b",
+    re.IGNORECASE,
+)
+
+# Speech-to-text may call an expense an "entry", "transaction", or even a
+# "response". These words describe the record being removed; they are not a
+# search term. Keeping them here also makes phrases such as "remove the most
+# recent response" resolve to the latest expense instead of a keyword search.
+_DELETE_FILLER_WORDS = re.compile(
+    r"\b(?:delete|remove|undo|erase|cancel|revert|rollback|scratch|"
+    r"get|rid|of|the|last|latest|most|recent|previous|prior|newest|"
+    r"just|now|my|our|an|a|that|this|one|thing|please|could|can|would|"
+    r"you|i|me|for|from|the|bot|assistant|response|responses|message|"
+    r"messages|expense|expenses|entry|entries|log|logs|record|records|"
+    r"transaction|transactions|purchase|purchases|item|items|payment|"
+    r"payments|spending|spent|was|wrong)\b",
     re.IGNORECASE,
 )
 
@@ -358,7 +375,15 @@ def parse_delete_intent(text: str) -> dict | None:
             "category": str | None,  # category inferred from the keyword
         }
     """
+    # Voice transcription can occasionally return an unexpected null or
+    # non-string value. Treat that as an ordinary, unrecognised message so it
+    # never crashes the message handler.
+    if not isinstance(text, str):
+        return None
+
     lower = text.lower().strip()
+    if not lower:
+        return None
 
     # Check if any delete trigger phrase is present
     is_delete = any(re.search(p, lower) for p in _DELETE_TRIGGER_PHRASES)
@@ -370,12 +395,7 @@ def parse_delete_intent(text: str) -> dict | None:
 
     # Try to extract a meaningful keyword (what to delete).
     # Strip common filler words and pull what's left.
-    stripped = re.sub(
-        r"\b(delete|remove|undo|erase|cancel|the|last|latest|recent|previous|my|an|a|that|expense|entry|log|record|just|now)\b",
-        "",
-        lower,
-        flags=re.IGNORECASE,
-    )
+    stripped = _DELETE_FILLER_WORDS.sub("", lower)
     # Remove punctuation and tidy up whitespace — a lone "." must not count as a keyword
     stripped = re.sub(r"[^a-z0-9 ]", "", stripped)
     stripped = re.sub(r"\s+", " ", stripped).strip()
