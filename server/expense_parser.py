@@ -230,6 +230,7 @@ def extract_date(text: str) -> str:
     Supports formats like:
       - "sixth February" / "6th February" / "6 February"
       - "February sixth" / "February 6th" / "February 6"
+      - "6/2", "6-2" (the year defaults to the current year)
       - "6/2/2026", "6-2-2026"
     Returns date in d-m-yyyy format. Defaults to today if no date found.
     """
@@ -244,7 +245,20 @@ def extract_date(text: str) -> str:
         year = int(date_format_match.group(3))
         try:
             dt = datetime(year, month, day)
-            return dt.strftime("%-d-%-m-%Y").replace("%-d", str(dt.day)).replace("%-m", str(dt.month))
+            return f"{dt.day}-{dt.month}-{dt.year}"
+        except ValueError:
+            pass
+
+    # 1b. Try day/month without a year — e.g. "13/8" means 13 August
+    #     in the current year. The boundary prevents this from partially
+    #     matching a date that includes an explicit year.
+    short_date_match = re.search(r"(\d{1,2})[/\-](\d{1,2})(?![/\-]\d)", lower)
+    if short_date_match:
+        day = int(short_date_match.group(1))
+        month = int(short_date_match.group(2))
+        try:
+            dt = datetime(now.year, month, day)
+            return f"{dt.day}-{dt.month}-{dt.year}"
         except ValueError:
             pass
 
