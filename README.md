@@ -10,6 +10,7 @@ A Telegram bot that lets you track expenses by sending voice messages. It uses *
 - **Voice messages** — Send a voice message describing your expense
 - **Text input** — Or just type your expense
 - **Smart parsing** — Automatically extracts amount, category, and description
+- **Category correction and learning** — Correct miscategorized expenses in natural language, and the bot remembers keyword/category mappings for future expenses
 - **Google Sheets** — Enter an expense month/date and the bot automatically creates or uses the matching tab
 - **Event tracking** — Select an event such as `Unit Rental` and keep its expenses in a dedicated tab
 - **Monthly summary** — View spending breakdown with `/summary`
