@@ -67,12 +67,14 @@ A Telegram bot that lets you track expenses by sending voice messages. It uses *
 | Log expense (voice) | Send a voice message: *"I spent 7 ringgit on chicken rice"* |
 | Log expense (text) | Type: *"Kopi RM5"* or *"Groceries 45 ringgit"* |
 | Remove latest expense | Say or type: *"Remove the most recent response"* or *"Delete the last expense"* |
+| Correct a category | Say or type: *"Actually, bread should be groceries"* |
 | Log an expense for another month | Include the date: *"RM25 groceries on 5 May 2026"*. The `May 2026` tab is created automatically. |
 | Start event tracking | Send `/event Unit Rental`. This creates/uses the `Event - Unit Rental` tab. |
 | Calculate event expenses | Send `/event_summary` or `/event_summary Unit Rental` |
 | Leave event mode | Send `/event off` to return to monthly tabs |
 | List event tabs | Send `/events` |
 | View summary | Send `/summary` |
+| Sort expense dates | Send `/sort` to sort existing tabs; new expenses are sorted automatically |
 | Get help | Send `/help` |
 
 ## Supported Categories
@@ -88,6 +90,14 @@ Expenses are automatically categorized:
 - **Health** — doctor, pharmacy, gym, etc.
 - **Education** — books, course, tuition, etc.
 - **Other** — anything that doesn't match above
+
+### Category learning
+
+If an expense is categorized incorrectly, say or type a correction such as
+*"Actually, bread should be groceries"*. The bot updates the matching expense
+and saves the keyword/category mapping in a `Category Learning` tab. Future
+expenses containing that keyword use the learned category before the default
+keyword rules.
 
 ## Google Sheet Format
 

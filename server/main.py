@@ -26,7 +26,12 @@ from telegram.ext import (
 
 try:
     from server.elevenlabs import transcribe_voice
-    from server.expense_parser import parse_expense, parse_delete_intent
+    from server.expense_parser import (
+        parse_expense,
+        parse_delete_intent,
+        parse_category_correction,
+        normalize_category_name,
+    )
     from server.sheets import (
         append_expense,
         ensure_event_sheet,
@@ -35,12 +40,21 @@ try:
         get_month_summary,
         list_event_names,
         delete_expense_by_row,
+        get_learned_category_mappings,
+        save_learned_category,
+        update_expense_category_by_row,
+        sort_expense_sheets,
     )
 except ImportError:
     # Fallback for running directly: python server/main.py
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     from elevenlabs import transcribe_voice           # type: ignore
-    from expense_parser import parse_expense, parse_delete_intent  # type: ignore
+    from expense_parser import (  # type: ignore
+        parse_expense,
+        parse_delete_intent,
+        parse_category_correction,
+        normalize_category_name,
+    )
     from sheets import (  # type: ignore
         append_expense,
         ensure_event_sheet,
@@ -49,6 +63,10 @@ except ImportError:
         get_month_summary,
         list_event_names,
         delete_expense_by_row,
+        get_learned_category_mappings,
+        save_learned_category,
+        update_expense_category_by_row,
+        sort_expense_sheets,
     )
 
 load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".env"))
@@ -82,8 +100,11 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         '"Remove the most recent response"\n'
         '"Remove my grab entry"\n'
         '"Undo the food expense"\n\n'
+        "*Correct a category:*\n"
+        '"Actually, bread should be groceries"\n\n'
         "*Commands:*\n"
         "/summary - View this month's expense summary\n"
+        "/sort - Sort expense tabs by date\n"
         "/event Unit Rental - create/select an event tab\n"
         "/event_summary - calculate the selected event\n"
         "/event off - return to monthly tabs\n"
@@ -106,6 +127,9 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         '- Include a category: "nasi lemak", "grab", "groceries"\n'
         '- Include a description: "lunch at mamak"\n\n'
         '- For a different month, include a date: "RM25 groceries on 5 May 2026"\n\n'
+        "*Correcting categories:*\n"
+        'Say or type "Actually, bread should be groceries". '
+        "The correction updates the matching expense and is remembered for future expenses.\n\n"
         "*Removing an expense:*\n"
         'Say or type something like:\n'
         '• "Delete the last expense" — removes your most recent entry\n'
@@ -116,6 +140,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         'Just type something like "Kopi RM5" or "Groceries 45 ringgit"\n\n'
         "*Commands:*\n"
         "/summary - This month's expense summary\n"
+        "/sort - Sort expense tabs by date\n"
         "/event Unit Rental - create/select an event tab\n"
         "/event_summary - calculate the selected event\n"
         "/event off - return to monthly tabs\n"
@@ -289,6 +314,166 @@ async def summary_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             "Failed to get summary. Check Google Sheets connection."
         )
+
+
+async def sort_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Sort all expense tabs by expense date."""
+    try:
+        await update.message.chat.send_action("typing")
+        sorted_count = sort_expense_sheets(include_events=True)
+        if sorted_count:
+            await update.message.reply_text(
+                f"✅ Sorted {sorted_count} expense tab(s) by date. "
+                "New expenses will stay sorted automatically."
+            )
+        else:
+            await update.message.reply_text(
+                "✅ Expense tabs are already sorted or have fewer than two entries."
+            )
+    except Exception:
+        logger.exception("Sort error")
+        await update.message.reply_text(
+            "Failed to sort expense tabs. Check Google Sheets connection."
+        )
+
+
+# ---------------------------------------------------------------------------
+# Category correction and learning
+# ---------------------------------------------------------------------------
+
+def _parse_expense_with_learned_categories(text: str) -> dict:
+    """Parse an expense using saved user corrections when available."""
+    try:
+        learned_categories = get_learned_category_mappings()
+    except Exception:
+        # A missing learning sheet must not stop ordinary expense logging.
+        logger.warning("Could not load learned categories; using default rules")
+        learned_categories = {}
+    return parse_expense(text, learned_categories=learned_categories)
+
+
+def _recent_expense_key(expense: dict):
+    """Sort expenses by logged timestamp, then by their sheet row."""
+    timestamp = str(expense.get("timestamp") or "").strip()
+    try:
+        logged_at = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+        if logged_at.tzinfo is not None:
+            logged_at = logged_at.astimezone(timezone.utc).replace(tzinfo=None)
+    except (TypeError, ValueError):
+        logged_at = datetime.min
+
+    try:
+        row_number = int(expense.get("row_number") or 0)
+    except (TypeError, ValueError):
+        row_number = 0
+    return logged_at, row_number
+
+
+def _find_correction_target(expenses: list[dict], keyword: str) -> dict | None:
+    """Find the latest expense matching a correction target."""
+    if not expenses:
+        return None
+
+    if keyword == "__last__":
+        return max(expenses, key=_recent_expense_key)
+
+    search_term = str(keyword or "").casefold()
+    matches = [
+        expense
+        for expense in expenses
+        if search_term in str(expense.get("description") or "").casefold()
+    ]
+    return max(matches, key=_recent_expense_key) if matches else None
+
+
+async def handle_category_correction(
+    update: Update,
+    correction: dict,
+) -> bool:
+    """Persist a category correction and update the matching expense."""
+    keyword = str(correction.get("keyword") or "").strip().casefold()
+    category = normalize_category_name(correction.get("category"))
+    if not keyword or not category:
+        await update.message.reply_text(
+            "I couldn't understand that category correction. Try "
+            '"bread should be groceries".'
+        )
+        return True
+
+    try:
+        await update.message.chat.send_action("typing")
+    except Exception:
+        # Sending the typing indicator is optional; continue with the update.
+        pass
+
+    mapping_saved = False
+    mapping_error = None
+    if keyword != "__last__":
+        try:
+            save_learned_category(keyword, category)
+            mapping_saved = True
+        except Exception as exc:
+            mapping_error = exc
+            logger.exception("Failed to save learned category")
+
+    target = None
+    target_updated = False
+    target_error = None
+    try:
+        expenses = get_all_expenses(include_events=True)
+        target = _find_correction_target(expenses, keyword)
+        if target:
+            update_expense_category_by_row(
+                target["row_number"],
+                target["sheet_name"],
+                category,
+            )
+            target_updated = True
+    except Exception as exc:
+        target_error = exc
+        logger.exception("Failed to update expense category")
+
+    if target_updated:
+        if mapping_saved:
+            await update.message.reply_text(
+                f"✅ Updated the {keyword} expense to {category}. "
+                f"Future {keyword} expenses will use {category}."
+            )
+        elif mapping_error:
+            await update.message.reply_text(
+                f"✅ Updated the existing {keyword} expense to {category}, "
+                "but I couldn't save the future rule. Please try again."
+            )
+        else:
+            await update.message.reply_text(
+                f"✅ Updated your latest expense to {category}."
+            )
+        return True
+
+    if mapping_saved and target_error is None:
+        await update.message.reply_text(
+            f"✅ Learned that {keyword} belongs to {category}. "
+            "I'll use this for future expenses. "
+            "I couldn't find an existing matching expense to update."
+        )
+        return True
+
+    if mapping_saved and target_error:
+        await update.message.reply_text(
+            f"✅ Learned that {keyword} belongs to {category}, but I couldn't "
+            "update the existing expense. Please try correcting it again."
+        )
+    elif mapping_error or target_error:
+        await update.message.reply_text(
+            "❌ I couldn't save that correction because Google Sheets "
+            "couldn't be reached. Please try again."
+        )
+    else:
+        await update.message.reply_text(
+            "I couldn't find an expense to correct. Try naming the item, "
+            'for example "bread should be groceries".'
+        )
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -504,14 +689,20 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         await update.message.reply_text(f'Heard: "{transcript}"')
 
-        # 3. Check for delete intent FIRST
+        # 3. Handle category corrections before normal expense parsing.
+        category_correction = parse_category_correction(transcript)
+        if category_correction:
+            await handle_category_correction(update, category_correction)
+            return
+
+        # 4. Check for delete intent FIRST
         delete_intent = parse_delete_intent(transcript)
         if delete_intent:
             await handle_delete_intent(update, delete_intent, transcript)
             return
 
-        # 4. Parse expense from transcript
-        expense = parse_expense(transcript)
+        # 5. Parse expense from transcript, including saved category rules.
+        expense = _parse_expense_with_learned_categories(transcript)
 
         if not expense["amount"]:
             await update.message.reply_text(
@@ -520,7 +711,7 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
-        # 5. Log to Google Sheets (selected event or automatic month tab)
+        # 6. Log to Google Sheets (selected event or automatic month tab)
         active_event = context.chat_data.get("active_event")
         target_tab = append_expense(expense, event_name=active_event)
         destination = (
@@ -556,13 +747,19 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         await update.message.chat.send_action("typing")
 
+        # Handle category corrections before normal expense parsing.
+        category_correction = parse_category_correction(text)
+        if category_correction:
+            await handle_category_correction(update, category_correction)
+            return
+
         # Check for delete intent FIRST
         delete_intent = parse_delete_intent(text)
         if delete_intent:
             await handle_delete_intent(update, delete_intent, text)
             return
 
-        expense = parse_expense(text)
+        expense = _parse_expense_with_learned_categories(text)
 
         if not expense["amount"]:
             await update.message.reply_text(
@@ -604,6 +801,7 @@ def _build_application():
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("summary", summary_command))
+    app.add_handler(CommandHandler("sort", sort_command))
     app.add_handler(CommandHandler("event", event_command))
     app.add_handler(CommandHandler("event_summary", event_summary_command))
     app.add_handler(CommandHandler("eventsummary", event_summary_command))

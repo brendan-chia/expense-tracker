@@ -93,6 +93,28 @@ CATEGORY_KEYWORDS = {
     "Other": [],
 }
 
+# Accept the category names users are likely to say in a correction. The
+# values remain the exact labels used in the expense sheets.
+_CATEGORY_ALIASES = {
+    category.casefold(): category
+    for category in CATEGORY_KEYWORDS
+}
+_CATEGORY_ALIASES.update({
+    "food": "Food & Dining",
+    "dining": "Food & Dining",
+    "food and dining": "Food & Dining",
+    "grocery": "Groceries",
+    "transportation": "Transport",
+    "bills": "Bills & Utilities",
+    "utilities": "Bills & Utilities",
+    "bills and utilities": "Bills & Utilities",
+})
+_CATEGORY_LABEL_PATTERN = "|".join(
+    re.escape(alias)
+    for alias in sorted(_CATEGORY_ALIASES, key=len, reverse=True)
+)
+_LAST_CORRECTION_TARGET = "__last__"
+
 WORD_NUMBERS = {
     "zero": 0, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7, "eight": 8, "nine": 9,
     "ten": 10, "eleven": 11, "twelve": 12, "thirteen": 13, "fourteen": 14, "fifteen": 15, "sixteen": 16,
@@ -204,9 +226,40 @@ def extract_amount(text: str) -> float | None:
     return None
 
 
-def detect_category(text: str) -> str:
-    """Detect the expense category based on keywords in the text."""
-    lower = text.lower()
+def normalize_category_name(value: str) -> str | None:
+    """Return the canonical sheet label for a category name or alias."""
+    normalized = re.sub(r"\s+", " ", str(value or "").strip().casefold())
+    return _CATEGORY_ALIASES.get(normalized)
+
+
+def _keyword_matches(text: str, keyword: str) -> bool:
+    """Match a learned keyword without matching it inside another word."""
+    return bool(
+        re.search(
+            rf"(?<!\w){re.escape(keyword.casefold())}(?!\w)",
+            text,
+            re.IGNORECASE,
+        )
+    )
+
+
+def detect_category(
+    text: str,
+    learned_categories: dict[str, str] | None = None,
+) -> str:
+    """Detect a category, preferring user-learned mappings over defaults."""
+    lower = text.casefold()
+
+    # User corrections are checked first. Longer phrases win, so a learned
+    # mapping for "protein shake" beats one for the shorter word "shake".
+    learned_matches = []
+    for keyword, category in (learned_categories or {}).items():
+        keyword = re.sub(r"\s+", " ", str(keyword or "").strip())
+        canonical_category = normalize_category_name(category)
+        if keyword and canonical_category and _keyword_matches(lower, keyword):
+            learned_matches.append((len(keyword), canonical_category))
+    if learned_matches:
+        return max(learned_matches, key=lambda item: item[0])[1]
 
     for category, keywords in CATEGORY_KEYWORDS.items():
         if category == "Other":
@@ -216,6 +269,62 @@ def detect_category(text: str) -> str:
                 return category
 
     return "Other"
+
+
+def _clean_correction_target(target: str) -> str:
+    """Normalize the item phrase extracted from a category correction."""
+    target = re.sub(r"[.!?,;:]+", " ", target.casefold())
+    target = re.sub(r"^\s*(?:actually|please)\s*,?\s*", "", target)
+    target = re.sub(r"^\s*(?:the|my)\s+", "", target)
+    target = re.sub(
+        r"\s+(?:expense|entry|purchase|item|transaction)\s*$",
+        "",
+        target,
+    )
+    target = re.sub(r"\s+", " ", target).strip()
+
+    if re.fullmatch(
+        r"(?:that|this|it|last|latest|previous|prior|most recent)"
+        r"(?:\s+(?:one|expense|entry|purchase))?",
+        target,
+    ):
+        return _LAST_CORRECTION_TARGET
+    return target[:100]
+
+
+def parse_category_correction(text: str) -> dict | None:
+    """Parse a user correction such as "bread should be groceries".
+
+    Returns ``{"keyword": ..., "category": ...}``, or ``None`` when the
+    message is not an unambiguous correction. ``__last__`` is used when the
+    user says "that" or "the last expense" instead of naming an item.
+    """
+    if not isinstance(text, str) or not text.strip():
+        return None
+
+    patterns = (
+        rf"^(?P<target>.+?)\s+"
+        rf"(?:should\s+(?:be|go\s+under)|belongs?\s+(?:in|under|to)|"
+        rf"goes?\s+under|is)\s+(?:the\s+)?"
+        rf"(?P<category>{_CATEGORY_LABEL_PATTERN})[.!?\s]*$",
+        rf"^(?:please\s+)?(?:change|correct|recategorize|reclassify)\s+"
+        rf"(?:the\s+)?(?P<target>.+?)\s+(?:to|as|into)\s+"
+        rf"(?P<category>{_CATEGORY_LABEL_PATTERN})[.!?\s]*$",
+        rf"^(?:please\s+)?set\s+(?:the\s+)?(?P<target>.+?)\s+"
+        rf"category\s+to\s+(?P<category>{_CATEGORY_LABEL_PATTERN})[.!?\s]*$",
+    )
+
+    for pattern in patterns:
+        match = re.match(pattern, text.casefold().strip(), re.IGNORECASE)
+        if not match:
+            continue
+
+        target = _clean_correction_target(match.group("target"))
+        category = normalize_category_name(match.group("category"))
+        if target and category:
+            return {"keyword": target, "category": category}
+
+    return None
 
 
 def clean_description(text: str) -> str:
@@ -310,7 +419,10 @@ def extract_date(text: str) -> str:
     return f"{now.day}-{now.month}-{now.year}"
 
 
-def parse_expense(text: str) -> dict:
+def parse_expense(
+    text: str,
+    learned_categories: dict[str, str] | None = None,
+) -> dict:
     """
     Parse a natural language string into an expense object.
 
@@ -321,7 +433,7 @@ def parse_expense(text: str) -> dict:
         Dict with keys: amount, category, description, date.
     """
     amount = extract_amount(text)
-    category = detect_category(text)
+    category = detect_category(text, learned_categories=learned_categories)
     description = clean_description(text)
     date = extract_date(text)
 

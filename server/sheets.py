@@ -17,6 +17,11 @@ logger = logging.getLogger(__name__)
 SHEET_NAME = os.environ.get("GOOGLE_EXPENSES_SHEET", "April")
 EVENT_TAB_PREFIX = "Event - "
 HEADERS = ["Date", "Amount", "Category", "Description", "Timestamp"]
+CATEGORY_LEARNING_SHEET = os.environ.get(
+    "GOOGLE_CATEGORY_LEARNING_SHEET",
+    "Category Learning",
+)
+CATEGORY_LEARNING_HEADERS = ["Keyword", "Category", "Updated At"]
 
 _DATE_FORMATS = (
     "%b %d, %Y",
@@ -287,6 +292,156 @@ def ensure_sheet(sheet_name: str = SHEET_NAME):
         raise
 
 
+def ensure_category_learning_sheet() -> str:
+    """Create the sheet used to persist user category corrections."""
+    service = get_client()
+    sheets = service.spreadsheets()
+    spreadsheet_id = _get_sheet_id()
+
+    spreadsheet = sheets.get(spreadsheetId=spreadsheet_id).execute()
+    properties = next(
+        (
+            item
+            for item in _get_sheet_properties(service, spreadsheet)
+            if item["title"] == CATEGORY_LEARNING_SHEET
+        ),
+        None,
+    )
+
+    if properties is None:
+        sheets.batchUpdate(
+            spreadsheetId=spreadsheet_id,
+            body={
+                "requests": [
+                    {
+                        "addSheet": {
+                            "properties": {"title": CATEGORY_LEARNING_SHEET}
+                        }
+                    }
+                ]
+            },
+        ).execute()
+        spreadsheet = sheets.get(spreadsheetId=spreadsheet_id).execute()
+        properties = next(
+            (
+                item
+                for item in _get_sheet_properties(service, spreadsheet)
+                if item["title"] == CATEGORY_LEARNING_SHEET
+            ),
+            None,
+        )
+
+    if properties is None:
+        raise ValueError(
+            f"Sheet tab '{CATEGORY_LEARNING_SHEET}' could not be created"
+        )
+
+    quoted_name = _quote_sheet_name(CATEGORY_LEARNING_SHEET)
+    header_check = sheets.values().get(
+        spreadsheetId=spreadsheet_id,
+        range=f"{quoted_name}!A1:C1",
+    ).execute()
+    if not header_check.get("values"):
+        sheets.values().update(
+            spreadsheetId=spreadsheet_id,
+            range=f"{quoted_name}!A1:C1",
+            valueInputOption="RAW",
+            body={"values": [CATEGORY_LEARNING_HEADERS]},
+        ).execute()
+
+    return CATEGORY_LEARNING_SHEET
+
+
+def get_learned_category_mappings() -> dict[str, str]:
+    """Read user-trained keyword-to-category mappings from Google Sheets."""
+    sheet_name = ensure_category_learning_sheet()
+    service = get_client()
+    result = service.spreadsheets().values().get(
+        spreadsheetId=_get_sheet_id(),
+        range=f"{_quote_sheet_name(sheet_name)}!A:C",
+    ).execute()
+
+    mappings: dict[str, str] = {}
+    for row in result.get("values", [])[1:]:
+        keyword = str(row[0] if len(row) > 0 else "").strip().casefold()
+        category = str(row[1] if len(row) > 1 else "").strip()
+        if keyword and category:
+            mappings[keyword] = category
+    return mappings
+
+
+def save_learned_category(keyword: str, category: str) -> None:
+    """Insert or update one persistent user category correction."""
+    keyword = re.sub(r"\s+", " ", str(keyword or "").strip().casefold())
+    category = str(category or "").strip()
+    if not keyword or not category:
+        raise ValueError("Both keyword and category are required")
+
+    sheet_name = ensure_category_learning_sheet()
+    service = get_client()
+    sheets = service.spreadsheets()
+    spreadsheet_id = _get_sheet_id()
+    quoted_name = _quote_sheet_name(sheet_name)
+    result = sheets.values().get(
+        spreadsheetId=spreadsheet_id,
+        range=f"{quoted_name}!A:C",
+    ).execute()
+    rows = result.get("values", [])
+    updated_at = datetime.now().isoformat()
+
+    for row_number, row in enumerate(rows[1:], start=2):
+        existing_keyword = str(row[0] if row else "").strip().casefold()
+        if existing_keyword != keyword:
+            continue
+
+        sheets.values().update(
+            spreadsheetId=spreadsheet_id,
+            range=f"{quoted_name}!B{row_number}:C{row_number}",
+            valueInputOption="RAW",
+            body={"values": [[category, updated_at]]},
+        ).execute()
+        logger.info("Updated learned category: '%s' -> %s", keyword, category)
+        return
+
+    sheets.values().append(
+        spreadsheetId=spreadsheet_id,
+        range=f"{quoted_name}!A:C",
+        valueInputOption="RAW",
+        insertDataOption="INSERT_ROWS",
+        body={"values": [[keyword, category, updated_at]]},
+    ).execute()
+    logger.info("Saved learned category: '%s' -> %s", keyword, category)
+
+
+def update_expense_category_by_row(
+    row_number: int,
+    sheet_name: str,
+    category: str,
+) -> bool:
+    """Update the category cell for an existing expense row."""
+    try:
+        row_number = int(row_number)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Expense row number is invalid") from exc
+    if row_number < 2:
+        raise ValueError("Expense row number is invalid")
+
+    sheets = get_client().spreadsheets()
+    sheets.values().update(
+        spreadsheetId=_get_sheet_id(),
+        range=f"{_quote_sheet_name(sheet_name)}!C{row_number}:C{row_number}",
+        valueInputOption="RAW",
+        body={"values": [[category]]},
+    ).execute()
+    logger.info(
+        "Updated row %s in '%s' to category %s",
+        row_number,
+        sheet_name,
+        category,
+    )
+    return True
+
+
 def ensure_event_sheet(event_name: str) -> str:
     """Create an event tab if needed and return its clean display name."""
     clean_name = normalize_event_name(event_name)
@@ -378,7 +533,94 @@ def append_expense(expense: dict, event_name: str | None = None) -> str:
         expense["amount"],
         expense["category"],
     )
+
+    # Keep each tab ordered by the expense date, even when a user logs an
+    # older expense after newer ones. A sorting failure should not undo a
+    # successful expense append.
+    try:
+        sort_expense_sheet(sheet_name)
+    except Exception:
+        logger.warning(
+            "Expense was logged, but '%s' could not be sorted by date",
+            sheet_name,
+            exc_info=True,
+        )
     return sheet_name
+
+
+def sort_expense_sheet(sheet_name: str) -> bool:
+    """Sort one expense tab by date, then by logged timestamp."""
+    service = get_client()
+    sheets = service.spreadsheets()
+    spreadsheet_id = _get_sheet_id()
+    spreadsheet = sheets.get(spreadsheetId=spreadsheet_id).execute()
+    properties = next(
+        (
+            item
+            for item in _get_sheet_properties(service, spreadsheet)
+            if item["title"] == sheet_name
+        ),
+        None,
+    )
+    if properties is None:
+        return False
+
+    values = sheets.values().get(
+        spreadsheetId=spreadsheet_id,
+        range=f"{_quote_sheet_name(sheet_name)}!A:E",
+    ).execute().get("values", [])
+    if len(values) <= 2:
+        return False
+
+    sheets.batchUpdate(
+        spreadsheetId=spreadsheet_id,
+        body={
+            "requests": [
+                {
+                    "sortRange": {
+                        "range": {
+                            "sheetId": properties["sheetId"],
+                            "startRowIndex": 1,
+                            "endRowIndex": len(values),
+                            "startColumnIndex": 0,
+                            "endColumnIndex": len(HEADERS),
+                        },
+                        "sortSpecs": [
+                            {
+                                "dimensionIndex": 0,
+                                "sortOrder": "ASCENDING",
+                            },
+                            {
+                                "dimensionIndex": 4,
+                                "sortOrder": "ASCENDING",
+                            },
+                        ],
+                    }
+                }
+            ]
+        },
+    ).execute()
+    logger.info("Sorted expense tab '%s' by date", sheet_name)
+    return True
+
+
+def sort_expense_sheets(include_events: bool = True) -> int:
+    """Sort all recognized expense tabs and return how many had rows sorted."""
+    service = get_client()
+    spreadsheet = service.spreadsheets().get(
+        spreadsheetId=_get_sheet_id(),
+    ).execute()
+    sheet_names = _get_expense_sheet_names(
+        service,
+        spreadsheet,
+        include_events=include_events,
+    )
+
+    sorted_count = 0
+    for sheet_name in sheet_names:
+        if sort_expense_sheet(sheet_name):
+            sorted_count += 1
+    return sorted_count
 
 
 def get_all_expenses(include_events: bool = False) -> list[dict]:
