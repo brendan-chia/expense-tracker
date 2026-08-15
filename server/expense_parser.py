@@ -21,6 +21,19 @@ MULTIPLIERS = {
     "thousand": 1000,
 }
 
+_NUMBER_WORD_PATTERN = "|".join(
+    re.escape(word)
+    for word in sorted(
+        set(WORD_NUMBERS) | set(MULTIPLIERS),
+        key=len,
+        reverse=True,
+    )
+)
+_NUMBER_WORD_SEQUENCE_PATTERN = (
+    rf"(?:{_NUMBER_WORD_PATTERN})"
+    rf"(?:(?:\s+and\s+|[\s-]+)(?:{_NUMBER_WORD_PATTERN}))*"
+)
+
 # Ordinal-to-number mapping (for date parsing)
 ORDINAL_NUMBERS = {
     "first": 1, "second": 2, "third": 3, "fourth": 4, "fifth": 5,
@@ -115,15 +128,6 @@ _CATEGORY_LABEL_PATTERN = "|".join(
 )
 _LAST_CORRECTION_TARGET = "__last__"
 
-WORD_NUMBERS = {
-    "zero": 0, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7, "eight": 8, "nine": 9,
-    "ten": 10, "eleven": 11, "twelve": 12, "thirteen": 13, "fourteen": 14, "fifteen": 15, "sixteen": 16,
-    "seventeen": 17, "eighteen": 18, "nineteen": 19, "twenty": 20, "thirty": 30, "forty": 40, "fifty": 50,
-    "sixty": 60, "seventy": 70, "eighty": 80, "ninety": 90
-}
-
-MULTIPLIERS = {"hundred": 100, "thousand": 1000}
-
 def words_to_number(text: str) -> float | None:
     """
     Convert word numbers to digits.
@@ -131,7 +135,6 @@ def words_to_number(text: str) -> float | None:
     Only parses a simple number — does NOT handle ringgit/cents splitting.
     """
     words = text.lower().replace("-", " ").split()
-    total = 0
     current = 0
 
     for word in words:
@@ -145,8 +148,15 @@ def words_to_number(text: str) -> float | None:
             if current > 0:
                 break
 
-    total += current
-    return total if total > 0 else None
+    return current if current > 0 else None
+
+
+def _parse_number_component(value: str) -> float | None:
+    """Parse either a numeric or a word-based amount component."""
+    value = value.strip()
+    if re.fullmatch(r"\d+(?:[.,]\d+)?", value):
+        return float(value.replace(",", "."))
+    return words_to_number(value)
 
 
 def extract_amount(text: str) -> float | None:
@@ -156,24 +166,48 @@ def extract_amount(text: str) -> float | None:
     """
     normalized = text.lower().strip()
 
-    # 0. Handle "X ringgit Y cents/sen" pattern (digits) — e.g. "15 ringgit 32 cents"
-    ringgit_cents_digits = re.search(
-        r"(\d+)\s*ringgit\s+(\d{1,2})\s*(?:cents?|sen)", normalized, re.IGNORECASE
+    # 0. Handle "X ringgit Y cents/sen" in either digits or words, including
+    # mixed forms such as "fifteen ringgit 32 cents".
+    amount_component = (
+        rf"(?:\d+(?:[.,]\d+)?|{_NUMBER_WORD_SEQUENCE_PATTERN})"
     )
-    if ringgit_cents_digits:
-        amount = int(ringgit_cents_digits.group(1)) + int(ringgit_cents_digits.group(2)) / 100
+    ringgit_cents_match = re.search(
+        rf"(?P<ringgit>{amount_component})\s*ringgit\s+"
+        rf"(?:and\s+)?(?P<cents>{amount_component})\s*(?:cents?|sen)\b",
+        normalized,
+        re.IGNORECASE,
+    )
+    if ringgit_cents_match:
+        ringgit_part = _parse_number_component(ringgit_cents_match.group("ringgit"))
+        cents_part = _parse_number_component(ringgit_cents_match.group("cents"))
+        if ringgit_part is not None and cents_part is not None:
+            amount = ringgit_part + cents_part / 100
+            if 0 < amount < 1000000:
+                return amount
+
+    # 1. Handle cents/sen without a ringgit value. The generic word-number
+    # fallback would otherwise interpret "eighty cents" as the number 80.
+    cents_digit_match = re.search(
+        r"(?<![\w.,])(?P<cents>\d+(?:[.,]\d+)?)\s*(?:cents?|sen)\b",
+        normalized,
+        re.IGNORECASE,
+    )
+    if cents_digit_match:
+        cents = float(cents_digit_match.group("cents").replace(",", "."))
+        amount = cents / 100
         if 0 < amount < 1000000:
             return amount
 
-    # 1. Handle "X ringgit Y cents/sen" with word numbers — e.g. "fifteen ringgit thirty-two cents"
-    ringgit_word_match = re.search(
-        r"(.+?)\s*ringgit\s+(.+?)\s*(?:cents?|sen)", normalized, re.IGNORECASE
+    cents_word_match = re.search(
+        rf"(?<![\w-])(?P<cents>{_NUMBER_WORD_SEQUENCE_PATTERN})"
+        rf"\s*(?:cents?|sen)\b",
+        normalized,
+        re.IGNORECASE,
     )
-    if ringgit_word_match:
-        ringgit_part = words_to_number(ringgit_word_match.group(1).strip())
-        cents_part = words_to_number(ringgit_word_match.group(2).strip())
-        if ringgit_part is not None and cents_part is not None:
-            amount = ringgit_part + cents_part / 100
+    if cents_word_match:
+        cents = words_to_number(cents_word_match.group("cents"))
+        if cents is not None:
+            amount = cents / 100
             if 0 < amount < 1000000:
                 return amount
 
@@ -292,10 +326,27 @@ def _clean_correction_target(target: str) -> str:
     return target[:100]
 
 
+def _split_correction_targets(target: str) -> list[str]:
+    """Return separate item keywords from a correction target.
+
+    Users commonly correct a list of items in one message, for example
+    ``"rice, curry paste should be groceries"``.  Keeping those items as
+    separate keywords lets the learning sheet store one reusable rule per
+    item and lets an existing expense match either item.
+    """
+    parts = re.split(r"\s*(?:[,;]|\band\b)\s*", target, flags=re.IGNORECASE)
+    keywords: list[str] = []
+    for part in parts:
+        keyword = _clean_correction_target(part)
+        if keyword and keyword not in keywords:
+            keywords.append(keyword)
+    return keywords
+
+
 def parse_category_correction(text: str) -> dict | None:
     """Parse a user correction such as "bread should be groceries".
 
-    Returns ``{"keyword": ..., "category": ...}``, or ``None`` when the
+    Returns ``{"keywords": [...], "category": ...}``, or ``None`` when the
     message is not an unambiguous correction. ``__last__`` is used when the
     user says "that" or "the last expense" instead of naming an item.
     """
@@ -313,16 +364,22 @@ def parse_category_correction(text: str) -> dict | None:
         rf"^(?:please\s+)?set\s+(?:the\s+)?(?P<target>.+?)\s+"
         rf"category\s+to\s+(?P<category>{_CATEGORY_LABEL_PATTERN})[.!?\s]*$",
     )
+    normalized = text.casefold().strip()
 
     for pattern in patterns:
-        match = re.match(pattern, text.casefold().strip(), re.IGNORECASE)
+        match = re.match(pattern, normalized, re.IGNORECASE)
         if not match:
             continue
 
-        target = _clean_correction_target(match.group("target"))
+        target = _split_correction_targets(match.group("target"))
         category = normalize_category_name(match.group("category"))
         if target and category:
-            return {"keyword": target, "category": category}
+            # A pronoun refers to one existing expense and cannot be turned
+            # into a useful future keyword mapping.  Do not mix it with a
+            # comma-separated list of real keywords.
+            if _LAST_CORRECTION_TARGET in target and len(target) != 1:
+                continue
+            return {"keywords": target, "category": category}
 
     return None
 
@@ -331,6 +388,32 @@ def clean_description(text: str) -> str:
     """Clean up the description text."""
     cleaned = re.sub(r"[.!?,;]+$", "", text).strip()
     return cleaned[:200]  # Cap at 200 chars
+
+
+def _format_date_parts(
+    day_text: str,
+    month_text: str,
+    year_text: str | None,
+    default_year: int,
+) -> str | None:
+    """Validate date words and return the sheet's date format."""
+    try:
+        day = ORDINAL_NUMBERS.get(day_text)
+        if day is None:
+            day = int(re.sub(r"(st|nd|rd|th)$", "", day_text))
+    except ValueError:
+        return None
+
+    month = MONTH_NAMES.get(month_text)
+    if not day or not month:
+        return None
+
+    year = int(year_text) if year_text else default_year
+    try:
+        date_value = datetime(year, month, day)
+    except ValueError:
+        return None
+    return f"{date_value.day}-{date_value.month}-{date_value.year}"
 
 
 def extract_date(text: str) -> str:
@@ -384,17 +467,14 @@ def extract_date(text: str) -> str:
         lower
     )
     if match:
-        day_str = match.group(1).strip()
-        month_str = match.group(2).strip()
-        day = ORDINAL_NUMBERS.get(day_str) or int(re.sub(r"(st|nd|rd|th)$", "", day_str))
-        month = MONTH_NAMES.get(month_str)
-        if day and month:
-            year = int(match.group(3)) if match.group(3) else now.year
-            try:
-                dt = datetime(year, month, day)
-                return f"{dt.day}-{dt.month}-{dt.year}"
-            except ValueError:
-                pass
+        parsed_date = _format_date_parts(
+            match.group(1).strip(),
+            match.group(2).strip(),
+            match.group(3),
+            now.year,
+        )
+        if parsed_date:
+            return parsed_date
 
     # Pattern: "February sixth" or "February 6th" or "February of 6th" or "Feb 6"
     match = re.search(
@@ -403,17 +483,14 @@ def extract_date(text: str) -> str:
         lower
     )
     if match:
-        month_str = match.group(1).strip()
-        day_str = match.group(2).strip()
-        day = ORDINAL_NUMBERS.get(day_str) or int(re.sub(r"(st|nd|rd|th)$", "", day_str))
-        month = MONTH_NAMES.get(month_str)
-        if day and month:
-            year = int(match.group(3)) if match.group(3) else now.year
-            try:
-                dt = datetime(year, month, day)
-                return f"{dt.day}-{dt.month}-{dt.year}"
-            except ValueError:
-                pass
+        parsed_date = _format_date_parts(
+            match.group(2).strip(),
+            match.group(1).strip(),
+            match.group(3),
+            now.year,
+        )
+        if parsed_date:
+            return parsed_date
 
     # 3. Default to today
     return f"{now.day}-{now.month}-{now.year}"
@@ -466,11 +543,6 @@ _DELETE_TRIGGER_PHRASES = [
     r"\bundo last\b",
 ]
 
-_LAST_INDICATORS = re.compile(
-    r"\b(?:most\s+recent|last|latest|recent|that|previous|prior|newest|just\s+now)\b",
-    re.IGNORECASE,
-)
-
 # Speech-to-text may call an expense an "entry", "transaction", or even a
 # "response". These words describe the record being removed; they are not a
 # search term. Keeping them here also makes phrases such as "remove the most
@@ -515,9 +587,6 @@ def parse_delete_intent(text: str) -> dict | None:
     is_delete = any(re.search(p, lower) for p in _DELETE_TRIGGER_PHRASES)
     if not is_delete:
         return None
-
-    # Determine if user says "last" / "recent" / "that" (no specific keyword)
-    has_last_indicator = bool(_LAST_INDICATORS.search(lower))
 
     # Try to extract a meaningful keyword (what to delete).
     # Strip common filler words and pull what's left.

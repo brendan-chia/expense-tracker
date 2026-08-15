@@ -24,6 +24,8 @@ from telegram.ext import (
     filters,
 )
 
+load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".env"))
+
 try:
     from server.elevenlabs import transcribe_voice
     from server.expense_parser import (
@@ -69,8 +71,6 @@ except ImportError:
         sort_expense_sheets,
     )
 
-load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".env"))
-
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO,
@@ -101,7 +101,8 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         '"Remove my grab entry"\n'
         '"Undo the food expense"\n\n'
         "*Correct a category:*\n"
-        '"Actually, bread should be groceries"\n\n'
+        '"Actually, bread should be groceries"\n'
+        '"rice, curry paste should be groceries"\n\n'
         "*Commands:*\n"
         "/summary - View this month's expense summary\n"
         "/sort - Sort expense tabs by date\n"
@@ -129,7 +130,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         '- For a different month, include a date: "RM25 groceries on 5 May 2026"\n\n'
         "*Correcting categories:*\n"
         'Say or type "Actually, bread should be groceries". '
-        "The correction updates the matching expense and is remembered for future expenses.\n\n"
+        'For multiple items, say "rice, curry paste should be groceries". '
+        "The correction updates the matching expense and remembers each item for future expenses.\n\n"
         "*Removing an expense:*\n"
         'Say or type something like:\n'
         '• "Delete the last expense" — removes your most recent entry\n'
@@ -258,12 +260,8 @@ async def summary_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
       /summary march 2025   → March 2025
       /summary 3 2025       → March 2025
     """
-    import calendar
-    from datetime import datetime
-
-    now = datetime.now()
     month: int | None = None
-    year:  int | None = None
+    year: int | None = None
 
     args = context.args or []
 
@@ -369,19 +367,90 @@ def _recent_expense_key(expense: dict):
     return logged_at, row_number
 
 
-def _find_correction_target(expenses: list[dict], keyword: str) -> dict | None:
+_SHEET_DATE_FORMATS = (
+    "%d/%m/%Y %H:%M:%S",
+    "%m/%d/%Y %H:%M:%S",
+    "%d/%m/%Y %H:%M",
+    "%m/%d/%Y %H:%M",
+    "%d/%m/%Y %I:%M:%S %p",
+    "%m/%d/%Y %I:%M:%S %p",
+    "%d/%m/%Y %I:%M %p",
+    "%m/%d/%Y %I:%M %p",
+    "%d-%m-%Y",
+    "%d-%m-%y",
+    "%Y-%m-%d",
+    "%b %d, %Y",
+    "%B %d, %Y",
+)
+
+
+def _parse_sheet_datetime(value) -> datetime | None:
+    """Parse timestamps and dates stored by Google Sheets."""
+    value = str(value or "").strip()
+    if not value:
+        return None
+
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if parsed.tzinfo is not None:
+            parsed = parsed.astimezone(timezone.utc).replace(tzinfo=None)
+        return parsed
+    except ValueError:
+        pass
+
+    for date_format in _SHEET_DATE_FORMATS:
+        try:
+            return datetime.strptime(value, date_format)
+        except ValueError:
+            continue
+    return None
+
+
+def _delete_expense_sort_key(expense: dict):
+    """Sort expenses newest-first for deletion."""
+    logged_at = _parse_sheet_datetime(expense.get("timestamp"))
+    expense_date = _parse_sheet_datetime(expense.get("date"))
+    try:
+        row_number = int(expense.get("row_number") or 0)
+    except (TypeError, ValueError):
+        row_number = 0
+    return (logged_at or expense_date or datetime.min, row_number)
+
+
+def _format_correction_keywords(keywords: list[str]) -> str:
+    """Format correction keywords for a user-facing message."""
+    if len(keywords) == 1:
+        return keywords[0]
+    if len(keywords) == 2:
+        return f"{keywords[0]} and {keywords[1]}"
+    return f"{', '.join(keywords[:-1])}, and {keywords[-1]}"
+
+
+def _find_correction_target(
+    expenses: list[dict],
+    keywords: list[str] | str,
+) -> dict | None:
     """Find the latest expense matching a correction target."""
     if not expenses:
         return None
 
-    if keyword == "__last__":
+    if isinstance(keywords, str):
+        keywords = [keywords]
+    normalized_keywords = [
+        str(keyword or "").strip().casefold() for keyword in keywords
+    ]
+
+    if "__last__" in normalized_keywords:
         return max(expenses, key=_recent_expense_key)
 
-    search_term = str(keyword or "").casefold()
+    search_terms = [keyword for keyword in normalized_keywords if keyword]
     matches = [
         expense
         for expense in expenses
-        if search_term in str(expense.get("description") or "").casefold()
+        if any(
+            search_term in str(expense.get("description") or "").casefold()
+            for search_term in search_terms
+        )
     ]
     return max(matches, key=_recent_expense_key) if matches else None
 
@@ -391,14 +460,32 @@ async def handle_category_correction(
     correction: dict,
 ) -> bool:
     """Persist a category correction and update the matching expense."""
-    keyword = str(correction.get("keyword") or "").strip().casefold()
+    raw_keywords = correction.get("keywords")
+    if raw_keywords is None:
+        # Keep compatibility with the previous single-keyword correction
+        # shape for callers that may still construct a correction directly.
+        raw_keywords = [correction.get("keyword")]
+    elif isinstance(raw_keywords, str):
+        raw_keywords = [raw_keywords]
+
+    keywords: list[str] = []
+    for raw_keyword in raw_keywords:
+        keyword = str(raw_keyword or "").strip().casefold()
+        if keyword and keyword not in keywords:
+            keywords.append(keyword)
+
     category = normalize_category_name(correction.get("category"))
-    if not keyword or not category:
+    if not keywords or not category:
         await update.message.reply_text(
             "I couldn't understand that category correction. Try "
-            '"bread should be groceries".'
+            '"rice, curry paste should be groceries".'
         )
         return True
+
+    keyword_label = _format_correction_keywords(keywords)
+    learning_keywords = [
+        keyword for keyword in keywords if keyword != "__last__"
+    ]
 
     try:
         await update.message.chat.send_action("typing")
@@ -406,22 +493,22 @@ async def handle_category_correction(
         # Sending the typing indicator is optional; continue with the update.
         pass
 
-    mapping_saved = False
-    mapping_error = None
-    if keyword != "__last__":
+    mapping_saved_keywords: list[str] = []
+    mapping_errors: list[Exception] = []
+    for keyword in learning_keywords:
         try:
             save_learned_category(keyword, category)
-            mapping_saved = True
+            mapping_saved_keywords.append(keyword)
         except Exception as exc:
-            mapping_error = exc
-            logger.exception("Failed to save learned category")
+            mapping_errors.append(exc)
+            logger.exception("Failed to save learned category '%s'", keyword)
 
     target = None
     target_updated = False
     target_error = None
     try:
         expenses = get_all_expenses(include_events=True)
-        target = _find_correction_target(expenses, keyword)
+        target = _find_correction_target(expenses, keywords)
         if target:
             update_expense_category_by_row(
                 target["row_number"],
@@ -434,14 +521,14 @@ async def handle_category_correction(
         logger.exception("Failed to update expense category")
 
     if target_updated:
-        if mapping_saved:
+        if learning_keywords and not mapping_errors:
             await update.message.reply_text(
-                f"✅ Updated the {keyword} expense to {category}. "
-                f"Future {keyword} expenses will use {category}."
+                f"✅ Updated the {keyword_label} expense to {category}. "
+                f"Future {keyword_label} expenses will use {category}."
             )
-        elif mapping_error:
+        elif mapping_errors:
             await update.message.reply_text(
-                f"✅ Updated the existing {keyword} expense to {category}, "
+                f"✅ Updated the existing {keyword_label} expense to {category}, "
                 "but I couldn't save the future rule. Please try again."
             )
         else:
@@ -450,20 +537,25 @@ async def handle_category_correction(
             )
         return True
 
-    if mapping_saved and target_error is None:
+    if learning_keywords and not mapping_errors and target_error is None:
         await update.message.reply_text(
-            f"✅ Learned that {keyword} belongs to {category}. "
+            f"✅ Learned that {keyword_label} belong to {category}. "
             "I'll use this for future expenses. "
             "I couldn't find an existing matching expense to update."
         )
         return True
 
-    if mapping_saved and target_error:
+    if learning_keywords and not mapping_errors and target_error:
         await update.message.reply_text(
-            f"✅ Learned that {keyword} belongs to {category}, but I couldn't "
+            f"✅ Learned that {keyword_label} belong to {category}, but I couldn't "
             "update the existing expense. Please try correcting it again."
         )
-    elif mapping_error or target_error:
+    elif mapping_saved_keywords and (mapping_errors or target_error):
+        await update.message.reply_text(
+            f"✅ Learned some of {keyword_label} as {category}, but one or more "
+            "updates failed. Please try again."
+        )
+    elif mapping_errors or target_error:
         await update.message.reply_text(
             "❌ I couldn't save that correction because Google Sheets "
             "couldn't be reached. Please try again."
@@ -522,59 +614,12 @@ async def handle_delete_intent(
         # Read every legacy/month tab so deletion works after expenses are split
         # across tabs. The row number is kept per tab for the Sheets API.
         all_expenses = get_all_expenses(include_events=True)
-
-        def _parse_datetime(value):
-            """Parse timestamps and dates stored by Google Sheets."""
-            value = str(value or "").strip()
-            if not value:
-                return None
-
-            # New rows contain an ISO timestamp. Normalize timezone-aware
-            # values before comparing them with older, naive sheet dates.
-            try:
-                parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-                if parsed.tzinfo is not None:
-                    parsed = parsed.astimezone(timezone.utc).replace(tzinfo=None)
-                return parsed
-            except ValueError:
-                pass
-
-            for fmt in (
-                "%d/%m/%Y %H:%M:%S",
-                "%m/%d/%Y %H:%M:%S",
-                "%d/%m/%Y %H:%M",
-                "%m/%d/%Y %H:%M",
-                "%d/%m/%Y %I:%M:%S %p",
-                "%m/%d/%Y %I:%M:%S %p",
-                "%d/%m/%Y %I:%M %p",
-                "%m/%d/%Y %I:%M %p",
-                "%d-%m-%Y",
-                "%d-%m-%y",
-                "%Y-%m-%d",
-                "%b %d, %Y",
-                "%B %d, %Y",
-            ):
-                try:
-                    return datetime.strptime(value, fmt)
-                except ValueError:
-                    continue
-            return None
-
-        def _expense_sort_key(expense: dict):
-            # "Most recent" means the latest logged record, not merely the
-            # latest expense date. Fall back to the date for legacy rows that
-            # do not have a timestamp, then to the row number for a stable tie.
-            logged_at = _parse_datetime(expense.get("timestamp"))
-            expense_date = _parse_datetime(expense.get("date"))
-            row_number = expense.get("row_number", 0)
-            try:
-                row_number = int(row_number)
-            except (TypeError, ValueError):
-                row_number = 0
-            return (logged_at or expense_date or datetime.min, row_number)
-
         # Sort ALL expenses across all tabs, newest logged entry first.
-        recent = sorted(all_expenses or [], key=_expense_sort_key, reverse=True)
+        recent = sorted(
+            all_expenses or [],
+            key=_delete_expense_sort_key,
+            reverse=True,
+        )
     except Exception:
         logger.exception("Delete: failed to fetch recent expenses")
         await update.message.reply_text(
@@ -664,20 +709,64 @@ async def handle_delete_intent(
     return True
 
 
+# Shared text/voice expense pipeline
+async def _process_expense_message(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    text: str,
+    *,
+    amount_error_prefix: str,
+    amount_help: str,
+    send_typing: bool = True,
+) -> None:
+    """Handle corrections, deletions, or normal expense logging."""
+    if send_typing:
+        await update.message.chat.send_action("typing")
+
+    category_correction = parse_category_correction(text)
+    if category_correction:
+        await handle_category_correction(update, category_correction)
+        return
+
+    delete_intent = parse_delete_intent(text)
+    if delete_intent:
+        await handle_delete_intent(update, delete_intent, text)
+        return
+
+    expense = _parse_expense_with_learned_categories(text)
+    if not expense["amount"]:
+        await update.message.reply_text(
+            f'{amount_error_prefix}: "{text}"\n\n{amount_help}'
+        )
+        return
+
+    active_event = context.chat_data.get("active_event")
+    target_tab = append_expense(expense, event_name=active_event)
+    destination = (
+        f"Event: *{active_event}*"
+        if active_event
+        else f"Tab: *{target_tab}*"
+    )
+
+    await update.message.reply_text(
+        "*Expense logged!*\n\n"
+        f"Amount: *RM{expense['amount']:.2f}*\n"
+        f"Category: *{expense['category']}*\n"
+        f"Description: {expense['description']}\n"
+        f"Date: {expense['date']}\n"
+        f"{destination}",
+        parse_mode="Markdown",
+    )
+
+
 # Handle voice messages
 async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.message.chat_id
-
     try:
         await update.message.chat.send_action("typing")
         await update.message.reply_text("Processing your voice message...")
 
-        # 1. Download voice file from Telegram
         voice_file = await update.message.voice.get_file()
-        file_url = voice_file.file_path
-
-        # 2. Transcribe using ElevenLabs
-        transcript = transcribe_voice(file_url)
+        transcript = transcribe_voice(voice_file.file_path)
 
         if not isinstance(transcript, str) or not transcript.strip():
             await update.message.reply_text(
@@ -686,48 +775,16 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         transcript = transcript.strip()
-
         await update.message.reply_text(f'Heard: "{transcript}"')
-
-        # 3. Handle category corrections before normal expense parsing.
-        category_correction = parse_category_correction(transcript)
-        if category_correction:
-            await handle_category_correction(update, category_correction)
-            return
-
-        # 4. Check for delete intent FIRST
-        delete_intent = parse_delete_intent(transcript)
-        if delete_intent:
-            await handle_delete_intent(update, delete_intent, transcript)
-            return
-
-        # 5. Parse expense from transcript, including saved category rules.
-        expense = _parse_expense_with_learned_categories(transcript)
-
-        if not expense["amount"]:
-            await update.message.reply_text(
-                f"Couldn't extract an expense amount from: \"{transcript}\"\n\n"
+        await _process_expense_message(
+            update,
+            context,
+            transcript,
+            amount_error_prefix="Couldn't extract an expense amount from",
+            amount_help=(
                 'Please include an amount, e.g. "I spent 7 ringgit on chicken rice"'
-            )
-            return
-
-        # 6. Log to Google Sheets (selected event or automatic month tab)
-        active_event = context.chat_data.get("active_event")
-        target_tab = append_expense(expense, event_name=active_event)
-        destination = (
-            f"Event: *{active_event}*"
-            if active_event
-            else f"Tab: *{target_tab}*"
-        )
-
-        await update.message.reply_text(
-            "*Expense logged!*\n\n"
-            f"Amount: *RM{expense['amount']:.2f}*\n"
-            f"Category: *{expense['category']}*\n"
-            f"Description: {expense['description']}\n"
-            f"Date: {expense['date']}\n"
-            f"{destination}",
-            parse_mode="Markdown",
+            ),
+            send_typing=False,
         )
     except Exception:
         logger.exception("Voice processing error")
@@ -739,51 +796,16 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # Handle text messages as typed expenses
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
-
-    # Skip commands
     if not text or text.startswith("/"):
         return
 
     try:
-        await update.message.chat.send_action("typing")
-
-        # Handle category corrections before normal expense parsing.
-        category_correction = parse_category_correction(text)
-        if category_correction:
-            await handle_category_correction(update, category_correction)
-            return
-
-        # Check for delete intent FIRST
-        delete_intent = parse_delete_intent(text)
-        if delete_intent:
-            await handle_delete_intent(update, delete_intent, text)
-            return
-
-        expense = _parse_expense_with_learned_categories(text)
-
-        if not expense["amount"]:
-            await update.message.reply_text(
-                f"Couldn't extract an expense from: \"{text}\"\n\n"
-                'Try: "Kopi RM5" or "Groceries 45 ringgit"'
-            )
-            return
-
-        active_event = context.chat_data.get("active_event")
-        target_tab = append_expense(expense, event_name=active_event)
-        destination = (
-            f"Event: *{active_event}*"
-            if active_event
-            else f"Tab: *{target_tab}*"
-        )
-
-        await update.message.reply_text(
-            "*Expense logged!*\n\n"
-            f"Amount: *RM{expense['amount']:.2f}*\n"
-            f"Category: *{expense['category']}*\n"
-            f"Description: {expense['description']}\n"
-            f"Date: {expense['date']}\n"
-            f"{destination}",
-            parse_mode="Markdown",
+        await _process_expense_message(
+            update,
+            context,
+            text,
+            amount_error_prefix="Couldn't extract an expense from",
+            amount_help='Try: "Kopi RM5" or "Groceries 45 ringgit"',
         )
     except Exception:
         logger.exception("Text expense error")

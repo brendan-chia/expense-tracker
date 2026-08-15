@@ -117,7 +117,12 @@ def normalize_event_name(event_name: str) -> str:
 
 def event_sheet_name(event_name: str) -> str:
     """Return the Google Sheets tab title for an event."""
-    return f"{EVENT_TAB_PREFIX}{normalize_event_name(event_name)}"
+    return _event_sheet_title(normalize_event_name(event_name))
+
+
+def _event_sheet_title(clean_name: str) -> str:
+    """Build an event tab title from an already-normalized name."""
+    return f"{EVENT_TAB_PREFIX}{clean_name}"
 
 
 def _parse_expense_date(date_value) -> datetime | None:
@@ -146,6 +151,80 @@ def _get_sheet_properties(service, spreadsheet=None) -> list[dict]:
         for sheet in spreadsheet.get("sheets", [])
         if sheet.get("properties", {}).get("title")
     ]
+
+
+def _find_sheet_properties(service, spreadsheet, sheet_name: str) -> dict | None:
+    """Find one tab's properties in spreadsheet metadata."""
+    return next(
+        (
+            properties
+            for properties in _get_sheet_properties(service, spreadsheet)
+            if properties["title"] == sheet_name
+        ),
+        None,
+    )
+
+
+def _ensure_tab_exists(service, sheet_name: str) -> tuple[str, dict]:
+    """Create a tab when needed and return its ID-bearing properties."""
+    spreadsheet_id = _get_sheet_id()
+    sheets = service.spreadsheets()
+    spreadsheet = sheets.get(spreadsheetId=spreadsheet_id).execute()
+    properties = _find_sheet_properties(service, spreadsheet, sheet_name)
+
+    if properties is None:
+        sheets.batchUpdate(
+            spreadsheetId=spreadsheet_id,
+            body={
+                "requests": [
+                    {"addSheet": {"properties": {"title": sheet_name}}}
+                ]
+            },
+        ).execute()
+        spreadsheet = sheets.get(spreadsheetId=spreadsheet_id).execute()
+        properties = _find_sheet_properties(service, spreadsheet, sheet_name)
+
+    if properties is None:
+        raise ValueError(f"Sheet tab '{sheet_name}' could not be created")
+    return spreadsheet_id, properties
+
+
+def _column_letter(column_number: int) -> str:
+    """Convert a one-based column number to an A1 column label."""
+    if column_number < 1:
+        raise ValueError("Column number must be positive")
+
+    letters = []
+    while column_number:
+        column_number, remainder = divmod(column_number - 1, 26)
+        letters.append(chr(ord("A") + remainder))
+    return "".join(reversed(letters))
+
+
+def _ensure_header_row(
+    sheets,
+    spreadsheet_id: str,
+    sheet_name: str,
+    headers: list[str],
+) -> bool:
+    """Create a tab's header row if it is empty; return whether it was added."""
+    last_column = _column_letter(len(headers))
+    quoted_name = _quote_sheet_name(sheet_name)
+    header_range = f"{quoted_name}!A1:{last_column}1"
+    header_check = sheets.values().get(
+        spreadsheetId=spreadsheet_id,
+        range=header_range,
+    ).execute()
+    if header_check.get("values"):
+        return False
+
+    sheets.values().update(
+        spreadsheetId=spreadsheet_id,
+        range=header_range,
+        valueInputOption="RAW",
+        body={"values": [headers]},
+    ).execute()
+    return True
 
 
 def _get_expense_sheet_names(
@@ -199,60 +278,11 @@ def ensure_sheet(sheet_name: str = SHEET_NAME):
 
     service = get_client()
     sheets = service.spreadsheets()
-    spreadsheet_id = _get_sheet_id()
     sheet_name = sheet_name.strip()
 
     try:
-        spreadsheet = sheets.get(spreadsheetId=spreadsheet_id).execute()
-        properties = next(
-            (
-                item
-                for item in _get_sheet_properties(service, spreadsheet)
-                if item["title"] == sheet_name
-            ),
-            None,
-        )
-
-        if properties is None:
-            sheets.batchUpdate(
-                spreadsheetId=spreadsheet_id,
-                body={
-                    "requests": [
-                        {
-                            "addSheet": {
-                                "properties": {"title": sheet_name}
-                            }
-                        }
-                    ]
-                },
-            ).execute()
-            spreadsheet = sheets.get(spreadsheetId=spreadsheet_id).execute()
-            properties = next(
-                (
-                    item
-                    for item in _get_sheet_properties(service, spreadsheet)
-                    if item["title"] == sheet_name
-                ),
-                None,
-            )
-
-        if properties is None:
-            raise ValueError(f"Sheet tab '{sheet_name}' could not be created")
-
-        quoted_name = _quote_sheet_name(sheet_name)
-        header_check = sheets.values().get(
-            spreadsheetId=spreadsheet_id,
-            range=f"{quoted_name}!A1:E1",
-        ).execute()
-
-        if not header_check.get("values"):
-            sheets.values().update(
-                spreadsheetId=spreadsheet_id,
-                range=f"{quoted_name}!A1:E1",
-                valueInputOption="RAW",
-                body={"values": [HEADERS]},
-            ).execute()
-
+        spreadsheet_id, properties = _ensure_tab_exists(service, sheet_name)
+        if _ensure_header_row(sheets, spreadsheet_id, sheet_name, HEADERS):
             sheets.batchUpdate(
                 spreadsheetId=spreadsheet_id,
                 body={
@@ -296,58 +326,13 @@ def ensure_category_learning_sheet() -> str:
     """Create the sheet used to persist user category corrections."""
     service = get_client()
     sheets = service.spreadsheets()
-    spreadsheet_id = _get_sheet_id()
-
-    spreadsheet = sheets.get(spreadsheetId=spreadsheet_id).execute()
-    properties = next(
-        (
-            item
-            for item in _get_sheet_properties(service, spreadsheet)
-            if item["title"] == CATEGORY_LEARNING_SHEET
-        ),
-        None,
+    spreadsheet_id, _ = _ensure_tab_exists(service, CATEGORY_LEARNING_SHEET)
+    _ensure_header_row(
+        sheets,
+        spreadsheet_id,
+        CATEGORY_LEARNING_SHEET,
+        CATEGORY_LEARNING_HEADERS,
     )
-
-    if properties is None:
-        sheets.batchUpdate(
-            spreadsheetId=spreadsheet_id,
-            body={
-                "requests": [
-                    {
-                        "addSheet": {
-                            "properties": {"title": CATEGORY_LEARNING_SHEET}
-                        }
-                    }
-                ]
-            },
-        ).execute()
-        spreadsheet = sheets.get(spreadsheetId=spreadsheet_id).execute()
-        properties = next(
-            (
-                item
-                for item in _get_sheet_properties(service, spreadsheet)
-                if item["title"] == CATEGORY_LEARNING_SHEET
-            ),
-            None,
-        )
-
-    if properties is None:
-        raise ValueError(
-            f"Sheet tab '{CATEGORY_LEARNING_SHEET}' could not be created"
-        )
-
-    quoted_name = _quote_sheet_name(CATEGORY_LEARNING_SHEET)
-    header_check = sheets.values().get(
-        spreadsheetId=spreadsheet_id,
-        range=f"{quoted_name}!A1:C1",
-    ).execute()
-    if not header_check.get("values"):
-        sheets.values().update(
-            spreadsheetId=spreadsheet_id,
-            range=f"{quoted_name}!A1:C1",
-            valueInputOption="RAW",
-            body={"values": [CATEGORY_LEARNING_HEADERS]},
-        ).execute()
 
     return CATEGORY_LEARNING_SHEET
 
@@ -445,7 +430,7 @@ def update_expense_category_by_row(
 def ensure_event_sheet(event_name: str) -> str:
     """Create an event tab if needed and return its clean display name."""
     clean_name = normalize_event_name(event_name)
-    ensure_sheet(event_sheet_name(clean_name))
+    ensure_sheet(_event_sheet_title(clean_name))
     return clean_name
 
 
@@ -500,7 +485,7 @@ def append_expense(expense: dict, event_name: str | None = None) -> str:
     spreadsheet_id = _get_sheet_id()
     if event_name:
         clean_event_name = ensure_event_sheet(event_name)
-        sheet_name = event_sheet_name(clean_event_name)
+        sheet_name = _event_sheet_title(clean_event_name)
     else:
         spreadsheet = sheets.get(spreadsheetId=spreadsheet_id).execute()
         existing_titles = {
@@ -647,10 +632,54 @@ def get_all_expenses(include_events: bool = False) -> list[dict]:
     return all_expenses
 
 
+def _expense_amount(expense: dict) -> float:
+    """Return a sheet amount as a number, treating invalid values as zero."""
+    try:
+        return float(expense.get("amount") or 0)
+    except (ValueError, TypeError):
+        return 0.0
+
+
+def _build_expense_summary(
+    expenses: list[dict],
+    heading: str,
+    period_label: str,
+) -> str:
+    """Build a grouped expense summary for an event or month."""
+    if not expenses:
+        return f"No expenses recorded for *{period_label}*."
+
+    category_totals: dict[str, float] = {}
+    total = 0.0
+    for expense in expenses:
+        amount = _expense_amount(expense)
+        category = str(expense.get("category") or "Other")
+        category_totals[category] = category_totals.get(category, 0.0) + amount
+        total += amount
+
+    lines = [f"*{heading}*", ""]
+    for category, amount in sorted(
+        category_totals.items(),
+        key=lambda item: item[1],
+        reverse=True,
+    ):
+        percentage = int((amount / total) * 100) if total > 0 else 0
+        lines.append(f"• {category}: *RM{amount:.2f}* ({percentage}%)")
+
+    lines.extend(
+        [
+            "",
+            f"*Total: RM{total:.2f}*",
+            f"{len(expenses)} expense(s) recorded",
+        ]
+    )
+    return "\n".join(lines)
+
+
 def get_event_summary(event_name: str) -> str:
     """Calculate totals for one event tab, grouped by category."""
     clean_name = ensure_event_sheet(event_name)
-    sheet_name = event_sheet_name(clean_name)
+    sheet_name = _event_sheet_title(clean_name)
     service = get_client()
     sheets = service.spreadsheets()
     expenses = _read_expenses_from_sheet(
@@ -659,32 +688,11 @@ def get_event_summary(event_name: str) -> str:
         sheet_name,
     )
 
-    if not expenses:
-        return f"No expenses recorded for *{clean_name}*."
-
-    category_totals: dict[str, float] = {}
-    total = 0.0
-    for expense in expenses:
-        try:
-            amount = float(expense["amount"])
-        except (ValueError, TypeError):
-            amount = 0.0
-        category = expense.get("category") or "Other"
-        category_totals[category] = category_totals.get(category, 0) + amount
-        total += amount
-
-    summary = f"*Event Summary - {clean_name}*\n\n"
-    for category, amount in sorted(
-        category_totals.items(),
-        key=lambda item: item[1],
-        reverse=True,
-    ):
-        percentage = int((amount / total) * 100) if total > 0 else 0
-        summary += f"• {category}: *RM{amount:.2f}* ({percentage}%)\n"
-
-    summary += f"\n*Total: RM{total:.2f}*"
-    summary += f"\n{len(expenses)} expense(s) recorded"
-    return summary
+    return _build_expense_summary(
+        expenses,
+        heading=f"Event Summary - {clean_name}",
+        period_label=clean_name,
+    )
 
 
 def delete_expense_by_row(
@@ -773,32 +781,8 @@ def get_month_summary(month: int | None = None, year: int | None = None) -> str:
         ):
             month_expenses.append(expense)
 
-    if not month_expenses:
-        return f"No expenses recorded for *{period_label}*."
-
-    category_totals: dict[str, float] = {}
-    total = 0.0
-
-    for expense in month_expenses:
-        try:
-            amount = float(expense["amount"])
-        except (ValueError, TypeError):
-            amount = 0.0
-        category = expense.get("category") or "Other"
-        category_totals[category] = category_totals.get(category, 0) + amount
-        total += amount
-
-    summary = f"*Expense Summary - {period_label}*\n\n"
-    sorted_categories = sorted(
-        category_totals.items(),
-        key=lambda item: item[1],
-        reverse=True,
+    return _build_expense_summary(
+        month_expenses,
+        heading=f"Expense Summary - {period_label}",
+        period_label=period_label,
     )
-
-    for category, amount in sorted_categories:
-        percentage = int((amount / total) * 100) if total > 0 else 0
-        summary += f"• {category}: *RM{amount:.2f}* ({percentage}%)\n"
-
-    summary += f"\n*Total: RM{total:.2f}*"
-    summary += f"\n{len(month_expenses)} expense(s) recorded"
-    return summary

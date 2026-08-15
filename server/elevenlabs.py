@@ -30,7 +30,7 @@ def transcribe_voice(file_path: str) -> str:
     # 1. Build the download URL.
     #    python-telegram-bot returns the full URL in file_path already,
     #    but guard against a bare relative path just in case.
-    if file_path.startswith("https://") or file_path.startswith("http://"):
+    if file_path.startswith(("https://", "http://")):
         telegram_url = file_path
     else:
         bot_token = os.environ.get("TELEGRAM_BOT_TOKEN")

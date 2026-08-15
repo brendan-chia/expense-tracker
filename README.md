@@ -2,9 +2,6 @@
 
 A Telegram bot that lets you track expenses by sending voice messages. It uses **ElevenLabs** for speech-to-text transcription and logs everything to **Google Sheets**.
 
-<img width="842" height="942" alt="image" src="https://github.com/user-attachments/assets/67206055-d803-4aee-b041-6b313b5c0da9" />
-
-
 ## Features
 
 - **Voice messages** — Send a voice message describing your expense
@@ -15,52 +12,6 @@ A Telegram bot that lets you track expenses by sending voice messages. It uses *
 - **Event tracking** — Select an event such as `Unit Rental` and keep its expenses in a dedicated tab
 - **Monthly summary** — View spending breakdown with `/summary`
 
-## Setup
-
-### 1. Telegram Bot
-
-1. Open Telegram and message [@BotFather](https://t.me/BotFather)
-2. Send `/newbot` and follow the prompts
-3. Copy the **bot token** you receive
-
-### 2. ElevenLabs API Key
-
-1. Sign up at [elevenlabs.io](https://elevenlabs.io)
-2. Go to [API Keys settings](https://elevenlabs.io/app/settings/api-keys)
-3. Create and copy an API key
-
-### 3. Google Sheets Setup
-
-#### Create a Google Cloud Service Account:
-
-1. Go to [Google Cloud Console](https://console.cloud.google.com/)
-2. Create a new project (or select existing)
-3. Enable the **Google Sheets API**:
-   - Go to **APIs & Services > Library**
-   - Search for "Google Sheets API" and click **Enable**
-4. Create a Service Account:
-   - Go to **APIs & Services > Credentials**
-   - Click **Create Credentials > Service Account**
-   - Give it a name (e.g., "expense-tracker")
-   - Click **Done**
-5. Create a key for the service account:
-   - Click on the service account you just created
-   - Go to **Keys** tab > **Add Key > Create new key**
-   - Choose **JSON** and download the file
-   - Save it as `google-credentials.json` in this project's root folder
-
-#### Create and share a Google Sheet:
-
-1. Create a new Google Sheet at [sheets.google.com](https://sheets.google.com)
-2. Copy the **Sheet ID** from the URL:
-   ```
-   https://docs.google.com/spreadsheets/d/YOUR_SHEET_ID_HERE/edit
-   ```
-3. **Share the sheet** with your service account email:
-   - Click **Share** on the Google Sheet
-   - Add the service account email (found in `google-credentials.json` as `client_email`)
-   - Give it **Editor** access
-
 ## Usage
 
 | Action | How |
@@ -68,7 +19,7 @@ A Telegram bot that lets you track expenses by sending voice messages. It uses *
 | Log expense (voice) | Send a voice message: *"I spent 7 ringgit on chicken rice"* |
 | Log expense (text) | Type: *"Kopi RM5"* or *"Groceries 45 ringgit"* |
 | Remove latest expense | Say or type: *"Remove the most recent response"* or *"Delete the last expense"* |
-| Correct a category | Say or type: *"Actually, bread should be groceries"* |
+| Correct a category | Say or type: *"Actually, bread should be groceries"* or *"rice, curry paste should be groceries"* |
 | Log an expense for another month | Include the date: *"RM25 groceries on 5 May 2026"*. The `May 2026` tab is created automatically. |
 | Start event tracking | Send `/event Unit Rental`. This creates/uses the `Event - Unit Rental` tab. |
 | Calculate event expenses | Send `/event_summary` or `/event_summary Unit Rental` |
@@ -95,10 +46,11 @@ Expenses are automatically categorized:
 ### Category learning
 
 If an expense is categorized incorrectly, say or type a correction such as
-*"Actually, bread should be groceries"*. The bot updates the matching expense
-and saves the keyword/category mapping in a `Category Learning` tab. Future
-expenses containing that keyword use the learned category before the default
-keyword rules.
+*"Actually, bread should be groceries"*. For multiple items, separate them
+with commas, for example *"rice, curry paste should be groceries"*. The bot
+updates the matching expense and saves one keyword/category mapping per item
+in a `Category Learning` tab. Future expenses containing those keywords use
+the learned category before the default keyword rules.
 
 ## Google Sheet Format
 
