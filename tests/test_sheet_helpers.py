@@ -12,7 +12,7 @@ class SheetHelperTests(unittest.TestCase):
     def test_summary_format_is_shared_for_sheet_summary_views(self):
         summary = _build_expense_summary(
             [
-                {"amount": "2", "category": "Food & Dining"},
+                {"amount": "2", "category": "Food"},
                 {"amount": "3", "category": "Groceries"},
             ],
             heading="Expense Summary - August 2026",
@@ -23,7 +23,7 @@ class SheetHelperTests(unittest.TestCase):
             summary,
             "*Expense Summary - August 2026*\n\n"
             "• Groceries: *RM3.00* (60%)\n"
-            "• Food & Dining: *RM2.00* (40%)\n\n"
+            "• Food: *RM2.00* (40%)\n\n"
             "*Total: RM5.00*\n"
             "2 expense(s) recorded",
         )

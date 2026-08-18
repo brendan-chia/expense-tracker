@@ -4,13 +4,18 @@ A Telegram bot that lets you track expenses by sending voice messages. It uses *
 
 ## Features
 
-- **Voice messages** — Send a voice message describing your expense
-- **Text input** — Or just type your expense
-- **Smart parsing** — Automatically extracts amount, category, and description
-- **Category correction and learning** — Correct miscategorized expenses in natural language, and the bot remembers keyword/category mappings for future expenses
-- **Google Sheets** — Enter an expense month/date and the bot automatically creates or uses the matching tab
-- **Event tracking** — Select an event such as `Unit Rental` and keep its expenses in a dedicated tab
-- **Monthly summary** — View spending breakdown with `/summary`
+| Capability | What it provides | Example / behavior |
+|------------|------------------|--------------------|
+| Voice logging | Describe an expense naturally; ElevenLabs converts the voice message to text. | “I spent 7 ringgit on chicken rice” |
+| Text logging | Log expenses directly without sending a voice message. | `Kopi RM5` |
+| Smart parsing | Extracts the amount, category, description, and date from natural language. | Supports RM, ringgit, cents, sen, and written numbers such as “eighty cents”. |
+| Automatic categorization | Assigns expenses to supported categories such as Food, Transport, Groceries, Sports, and more. | Unmatched expenses are placed in `Other`. |
+| Category learning | Correct a category in plain language; the matching expense is updated and the keyword rule is remembered. | `rice, curry paste should be groceries` creates one learning rule per item. |
+| Automatic sheet organization | Creates or selects the appropriate month tab from the expense date and keeps the tab ordered by date. | `RM25 groceries on 5 May 2026` uses the `May 2026` tab. |
+| Event tracking | Keeps event-specific spending separate from regular monthly expenses. | `/event Unit Rental` uses an `Event - Unit Rental` tab. |
+| Expense removal | Remove the latest expense or search for a specific entry using natural language. | `Delete the last expense` or `Remove my Grab entry` |
+| Summaries | Groups spending by category and shows totals and percentages. | `/summary` or `/event_summary` |
+| Expense sorting | Re-sort existing expense tabs whenever needed. | `/sort` |
 
 ## Usage
 
@@ -33,11 +38,12 @@ A Telegram bot that lets you track expenses by sending voice messages. It uses *
 
 Expenses are automatically categorized:
 
-- **Food & Dining** — lunch, dinner, coffee, restaurant, etc.
+- **Food** — lunch, dinner, coffee, restaurant, etc.
 - **Transport** — taxi, uber, gas, parking, etc.
 - **Groceries** — grocery, supermarket, etc.
 - **Shopping** — clothes, amazon, electronics, etc.
 - **Entertainment** — movie, netflix, gaming, etc.
+- **Sports** — badminton, tennis, football, exercise, etc.
 - **Bills & Utilities** — rent, electric, phone, internet, etc.
 - **Health** — doctor, pharmacy, gym, etc.
 - **Education** — books, course, tuition, etc.
@@ -52,13 +58,17 @@ updates the matching expense and saves one keyword/category mapping per item
 in a `Category Learning` tab. Future expenses containing those keywords use
 the learned category before the default keyword rules.
 
+For example, an expense such as *"RM38 on badminton string"* can be corrected
+with *"badminton should be sports"*. The existing expense is moved to
+`Sports`, and future badminton expenses use the learned category.
+
 ## Google Sheet Format
 
 When you include a month/date in an expense, the bot automatically creates or uses a tab named for that month, such as `May 2026`. You do not need to create the tab manually. Each tab contains these columns:
 
 | Date | Amount | Category | Description | Timestamp |
 |------|--------|----------|-------------|-----------|
-| Feb 12, 2026 | 7 | Food & Dining | Spent 7 ringgit on chicken rice | 2026-02-12T12:00:00Z |
+| Feb 12, 2026 | 7 | Food | Spent 7 ringgit on chicken rice | 2026-02-12T12:00:00Z |
 
 ### Event tabs
 

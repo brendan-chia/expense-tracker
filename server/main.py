@@ -137,7 +137,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         '• "Delete the last expense" — removes your most recent entry\n'
         '• "Remove the most recent response" — also removes your latest entry\n'
         '• "Remove my grab entry" — finds & removes the most recent Grab expense\n'
-        '• "Undo the food expense" — removes the most recent Food \u0026 Dining entry\n\n'
+        '• "Undo the food expense" — removes the most recent Food entry\n\n'
         "*You can also type expenses:*\n"
         'Just type something like "Kopi RM5" or "Groceries 45 ringgit"\n\n'
         "*Commands:*\n"

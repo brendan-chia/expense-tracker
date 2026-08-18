@@ -56,7 +56,7 @@ MONTH_NAMES = {
 
 # Category keywords mapping (with Malaysian context)
 CATEGORY_KEYWORDS = {
-    "Food & Dining": [
+    "Food": [
         "food", "lunch", "dinner", "breakfast", "meal", "restaurant", "cafe",
         "coffee", "pizza", "burger", "sushi", "snack", "eat", "ate", "dining",
         "takeout", "delivery", "brunch", "dessert", "bakery", "tea",
@@ -87,6 +87,11 @@ CATEGORY_KEYWORDS = {
         "subscription", "game", "gaming", "concert", "show", "ticket",
         "museum", "park", "fun", "entertainment", "hobby", "karaoke",
     ],
+    "Sports": [
+        "sport", "sports", "badminton", "tennis", "football", "soccer",
+        "basketball", "volleyball", "swimming", "running", "cycling",
+        "workout", "exercise", "pilates", "yoga", "marathon",
+    ],
     "Bills & Utilities": [
         "bill", "bills", "electric", "electricity", "tnb", "water", "syabas",
         "internet", "unifi", "maxis", "celcom", "digi", "yes",
@@ -113,10 +118,12 @@ _CATEGORY_ALIASES = {
     for category in CATEGORY_KEYWORDS
 }
 _CATEGORY_ALIASES.update({
-    "food": "Food & Dining",
-    "dining": "Food & Dining",
-    "food and dining": "Food & Dining",
+    "food": "Food",
+    "dining": "Food",
+    "food & dining": "Food",
+    "food and dining": "Food",
     "grocery": "Groceries",
+    "sport": "Sports",
     "transportation": "Transport",
     "bills": "Bills & Utilities",
     "utilities": "Bills & Utilities",
@@ -299,7 +306,7 @@ def detect_category(
         if category == "Other":
             continue
         for keyword in keywords:
-            if keyword in lower:
+            if _keyword_matches(lower, keyword):
                 return category
 
     return "Other"
